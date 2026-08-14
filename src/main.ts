@@ -474,6 +474,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			const bridge = spawn(bridgePath, [endpoint.host, String(endpoint.port), psk])
 			this.bridge = bridge
 			const state = { ready: false }
+			bridge.on('spawn', () => this.log('info', 'Keyed transport process started'))
 			bridge.stdout.on('data', (data: Buffer) => {
 				if (!this.keyedDataReceived) {
 					this.keyedDataReceived = true
@@ -506,6 +507,9 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					}
 					this.scheduleReconnect()
 				}
+			})
+			bridge.on('close', (code, signal) => {
+				this.log('warn', `Keyed transport process closed (${code ?? signal ?? 'unknown'})`)
 			})
 		} catch (error) {
 			this.updateStatus(InstanceStatus.ConnectionFailure, `Unable to start keyed transport: ${(error as Error).message}`)
