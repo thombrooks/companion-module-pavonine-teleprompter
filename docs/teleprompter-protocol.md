@@ -6,13 +6,15 @@ Status: experimental; observed on macOS Teleprompter 3.1.1 (build 1514) and Tele
 
 These notes cover local control of a script you are authorized to operate. A device with network access can control a Teleprompter instance when no network key is configured, so use an isolated production VLAN and set a network key once the integration is validated.
 
-The Companion module uses Bonjour to find Teleprompter instances and passively reads the document list after connecting. A service is merged by its UUID, not by address: one Mac can advertise the same service through Wi-Fi, Thunderbolt, USB Ethernet, and IPv6. When the resolved addresses belong to the Mac running Companion, the module prefers loopback; otherwise it retains the advertised addresses and retries them if an endpoint cannot authenticate. It does not edit scripts or retain a packet capture.
+The Companion module uses Bonjour to find Teleprompter instances and passively reads the document list after connecting. A service is merged by its UUID, not by address: one Mac can advertise the same service through Wi-Fi, Thunderbolt, USB Ethernet, and IPv6. When the resolved addresses belong to the Mac running Companion, the module prefers loopback; otherwise it prefers IPv4, then globally routable IPv6, with IPv6 link-local addresses as a last resort because Bonjour's JavaScript resolver does not provide their interface scope IDs. It does not edit scripts or retain a packet capture.
 
 ## Transport and discovery
 
 Teleprompter uses Bonjour (`NSNetService` / `NWListener`) to advertise and discover peers, then uses plain TCP for collaboration. The observed service type is `_teleprompter3._tcp`. Its TCP port is advertised by Bonjour and is dynamic: captures observed `65330` and `65331`, so clients must use the resolved service port rather than hard-code one.
 
 An observed service advertisement had instance UUID `EC3202A4-2424-4C20-A5C7-62567212F8E0`, friendly-name TXT record `hostname=Thom’s MacBook Air`, and a `challenge` TXT record of the same UUID when no network key was configured. Without a network key, the application uses plain TCP (not HTTP, WebSocket, OSC, or TLS).
+
+Bonjour can send the SRV/TXT record before its A/AAAA address record, particularly when an iPad wakes onto Wi-Fi. The module must retain such a service using its advertised `.local` hostname until the numeric address arrives; discarding address-less announcements makes the iPad intermittently vanish from the picker. This was verified with a full Teleprompter instance on iPad: after resolving its IPv4 address and matching its network key, the module authenticated and discovered its document successfully.
 
 There is an 8-byte keepalive frame containing a zero little-endian length. It is sent by both sides while the controller is attached.
 
