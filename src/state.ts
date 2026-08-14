@@ -34,17 +34,34 @@ export function speedLabel(speed: number): string {
 	return `${Math.round(clampManualSpeed(speed) / 5)}%`
 }
 
-export function selectedDocumentAfterDeviceChange(previousDeviceId: string, nextDeviceId: string, documentId: string): string {
+export function selectedDocumentAfterDeviceChange(
+	previousDeviceId: string,
+	nextDeviceId: string,
+	documentId: string,
+): string {
 	return previousDeviceId === nextDeviceId ? documentId : ''
 }
 
-export function automaticallySelectedDocument(documents: ReadonlyMap<string, string>, selectedDocumentId: string): string | undefined {
+export function automaticallySelectedDocument(
+	documents: ReadonlyMap<string, string>,
+	selectedDocumentId: string,
+): string | undefined {
 	if (selectedDocumentId || documents.size !== 1) return undefined
 	return documents.keys().next().value
 }
 
+/** A selected document is safe for position-dependent control only after its own timing snapshot arrives. */
+export function hasFreshDocumentTimingSnapshot(documentId: string, snapshots: ReadonlyMap<string, number>): boolean {
+	return Boolean(documentId) && snapshots.has(documentId)
+}
+
 /** Short, operator-facing state for a Stream Deck document-status indicator. */
-export function documentStatus(connected: boolean, documents: ReadonlyMap<string, string>, selectedDocumentId: string, selectedDocumentName: string): string {
+export function documentStatus(
+	connected: boolean,
+	documents: ReadonlyMap<string, string>,
+	selectedDocumentId: string,
+	selectedDocumentName: string,
+): string {
 	if (!connected) return 'OFFLINE'
 	const selectedName = documents.get(selectedDocumentId)
 	if (selectedName) return `READY\n${selectedName}`
@@ -52,7 +69,13 @@ export function documentStatus(connected: boolean, documents: ReadonlyMap<string
 	return `CLOSED\n${selectedDocumentName || 'DOCUMENT'}`
 }
 
-export function estimateTiming(timing: TimingState, motion: Motion, speed: number, startedAt: number | undefined, now: number): TimingState {
+export function estimateTiming(
+	timing: TimingState,
+	motion: Motion,
+	speed: number,
+	startedAt: number | undefined,
+	now: number,
+): TimingState {
 	if (motion === 'stopped' || startedAt === undefined) return timing
 	const direction = motion === 'reverse' ? -1 : 1
 	return { ...timing, keyPosition: Math.max(0, timing.keyPosition + direction * ((now - startedAt) / 1000) * speed) }

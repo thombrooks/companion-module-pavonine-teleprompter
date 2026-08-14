@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { frame, resetMutation, speedMutation, transportMutation } from '../dist/protocol.js'
+import { frame, resetMutation, segmentJumpMutation, speedMutation, transportMutation } from '../dist/protocol.js'
 
 const documentId = '01234567-89AB-CDEF-0123-456789ABCDEF'
 
@@ -54,6 +54,13 @@ test('speed mutation changes only manualSpeed', () => {
 	assert.equal(changeSet.length, 1)
 	assert.deepEqual(changeSet[0].path, ['documents', documentId, 'model', 'timing', 'manualSpeed'])
 	assert.deepEqual(changeSet[0].value, [2, ['Double', 110]])
+})
+
+test('segment jump keeps the current anchor and moves only the visible playhead', () => {
+	const changeSet = changes(segmentJumpMutation(documentId, 100, 500, 106n))
+	assert.deepEqual(changeSet.map((change) => change.path.at(-1)), ['keyPosition', 'keyTime', 'scrolledPosition'])
+	assert.deepEqual(changeSet[0].value, [2, ['CGFloat', 100]])
+	assert.deepEqual(changeSet[2].value, [2, ['CGFloat', 500]])
 })
 
 test('reset stops and moves the visible position to the start', () => {

@@ -81,6 +81,21 @@ export function speedMutation(documentId: string, speed: number, sequence: bigin
 	return frame(mutation(documentId, [[['timing', 'manualSpeed'], [2, ['Double', speed]]]], sequence))
 }
 
+/** Observed TP Controller segment jumps update the old anchor and visible position only. */
+export function segmentJumpMutation(documentId: string, currentPosition: number, targetPosition: number, sequence: bigint): Buffer {
+	return frame(
+		mutation(
+			documentId,
+			[
+				[['timing', 'keyPosition'], [2, ['CGFloat', currentPosition]]],
+				[['timing', 'keyTime'], [2, ['Delta', 0.002]]],
+				[['timing', 'scrolledPosition'], [2, ['CGFloat', targetPosition]]],
+			],
+			sequence,
+		),
+	)
+}
+
 export function resetMutation(documentId: string, sequence: bigint): Buffer {
 	const actor = randomUUID().toUpperCase()
 	const index = randomUInt64()
