@@ -76,6 +76,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	private sequence = BigInt(Date.now())
 	private socket: net.Socket | undefined
 	private bridge: ChildProcessWithoutNullStreams | undefined
+	private keyedDataReceived = false
 	private receiveBuffer = Buffer.alloc(0)
 	private reconnectTimer: NodeJS.Timeout | undefined
 	private noDocumentTimer: NodeJS.Timeout | undefined
@@ -459,6 +460,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	}
 	private connectKeyed(device: TeleprompterDevice): void {
 		this.updateStatus(InstanceStatus.Connecting, 'Connecting with network key')
+		this.keyedDataReceived = false
 		const hostIndex = this.keyedHostIndex % device.hosts.length
 		const endpoint: Endpoint = { host: device.hosts[hostIndex] ?? device.host, port: device.port }
 		this.log('info', `Launching keyed transport to ${endpoint.host}:${endpoint.port}`)
@@ -472,11 +474,18 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			const bridge = spawn(bridgePath, [endpoint.host, String(endpoint.port), psk])
 			this.bridge = bridge
 			const state = { ready: false }
-			bridge.stdout.on('data', (data: Buffer) => this.receive(data))
+			bridge.stdout.on('data', (data: Buffer) => {
+				if (!this.keyedDataReceived) {
+					this.keyedDataReceived = true
+					this.log('info', `Received ${data.length} bytes of encrypted Teleprompter state`)
+				}
+				this.receive(data)
+			})
 			bridge.stderr.on('data', (data: Buffer) => {
 				const message = data.toString('utf8').trim()
 				if (message === 'READY') {
 					state.ready = true
+					this.log('info', 'Keyed Teleprompter transport authenticated')
 					this.connected()
 				} else if (message) {
 					this.log('warn', message)
