@@ -72,12 +72,12 @@ Node's built-in TLS client cannot emit the required arbitrary binary PSK identit
 
 ### Companion runtime constraint (observed)
 
-This module can use plain TCP when no network key is configured. The keyed transport itself was verified independently on macOS: a small `Network.framework` bridge authenticated and received the full state frame, including a document name. It cannot presently run *inside* Companion 5.0.3's user-module host:
+This module can use plain TCP when no network key is configured. The keyed transport itself was verified independently on macOS: a small `Network.framework` bridge authenticated and received the full state frame, including a document name. Companion's module host disables both spawned processes and native addons by default. API 1.12 provides explicit module permissions for these capabilities.
 
-- `child_process.spawn()` never emits a child-process event when invoked by the module host, so a bundled executable bridge cannot be used.
-- A bundled N-API addon and its linked Swift/Network.framework library load in Companion's standalone Node runtime but are rejected by the module host with: `Cannot load native addon because loading addons is disabled.`
+- A bundled N-API addon and its linked Swift/Network.framework library are rejected without the manifest permission, with: `Cannot load native addon because loading addons is disabled.`
+- The module declares `runtime.permissions.native-addons: true` so Companion can enable this supported, prebuilt native dependency.
 
-Therefore, Companion's user-module sandbox currently prevents the only known macOS implementation of this binary-identity TLS-PSK protocol. The module must report this limitation clearly rather than leave the document picker in a perpetual authentication state. A future solution requires either native-addon support in Companion, a supported Companion-managed native helper mechanism, or a separately installed user-authorized local bridge service.
+The addon is macOS/arm64-specific and must be distributed as a prebuilt binary. Companion documents native dependencies as supported with the appropriate permission declaration; verify the packaged module on each target architecture.
 
 ## Document discovery
 
@@ -137,5 +137,5 @@ Do not commit captures: they can contain script text, document IDs, device names
 ## Next research steps
 
 - Verify a generated mutation from the module against a sacrificial script, one action at a time.
-- Investigate a supported Companion mechanism for a local native TLS-PSK bridge; native addons and spawned executable helpers are disabled in the current user-module host.
+- Verify the prebuilt macOS native-addon transport on both local and remote Teleprompter devices.
 - Add passive state parsing, feedbacks, and presets only after mutation reliability is proven.
