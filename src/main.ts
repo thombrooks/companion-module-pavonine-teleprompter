@@ -471,7 +471,18 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			? developmentBridge
 			: path.join(moduleDirectory, 'companion', 'teleprompter-tls-bridge')
 		try {
-			const bridge = spawn(bridgePath, [endpoint.host, String(endpoint.port), psk])
+			// Companion's module host can stall when it directly launches a bundled
+			// Mach-O executable. Launching through the system shell gives the helper
+			// normal process setup while `exec` preserves the stdin/stdout bridge.
+			const bridge = spawn('/bin/sh', [
+				'-c',
+				'exec "$@"',
+				'teleprompter-tls-bridge',
+				bridgePath,
+				endpoint.host,
+				String(endpoint.port),
+				psk,
+			])
 			this.bridge = bridge
 			const state = { ready: false }
 			bridge.on('spawn', () => this.log('info', 'Keyed transport process started'))
