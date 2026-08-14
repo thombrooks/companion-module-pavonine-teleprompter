@@ -211,6 +211,10 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		const previous = this.devices.get(id)
 		const advertised = (service.addresses ?? []).filter((address) => net.isIP(address) !== 0)
 		const resolvedAddresses = [...new Set([...(previous?.hosts ?? []), ...advertised])]
+		// Bonjour may deliver SRV/TXT before the A/AAAA response, especially for an
+		// iPad waking onto Wi-Fi. Keep the service visible and let Network.framework
+		// resolve its advertised .local host until its numeric address arrives.
+		if (resolvedAddresses.length === 0 && service.host) resolvedAddresses.push(service.host)
 		if (resolvedAddresses.length === 0 || !service.port) return
 		const localAddresses = new Set(
 			Object.values(networkInterfaces())
