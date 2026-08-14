@@ -399,6 +399,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	private connect(): void {
 		this.destroyed = false
 		if (this.socket || this.reconnectTimer) return
+		this.log('debug', `Connecting to ${this.config.deviceId || 'no selected device'}; network key present: ${this.networkKey() ? 'yes' : 'no'}`)
 		const endpoint = this.endpoint()
 		if (!endpoint) {
 			this.updateStatus(InstanceStatus.Connecting, 'Searching for Teleprompter')
