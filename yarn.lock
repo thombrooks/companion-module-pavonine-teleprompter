@@ -330,6 +330,7 @@ __metadata:
     "@companion-module/tools": "npm:^3.0.1"
     "@types/node": "npm:^22.19.17"
     bonjour-service: "npm:^1.4.4"
+    node-api-headers: "npm:1.9.0"
     prettier: "npm:^3.8.3"
     typescript: "npm:~6.0.3"
   languageName: unknown
@@ -625,6 +626,13 @@ __metadata:
   bin:
     multicast-dns: cli.js
   checksum: 10c0/5120171d4bdb1577764c5afa96e413353bff530d1b37081cb29cccc747f989eb1baf40574fe8e27060fc1aef72b59c042f72b9b208413de33bcf411343c69057
+  languageName: node
+  linkType: hard
+
+"node-api-headers@npm:1.9.0":
+  version: 1.9.0
+  resolution: "node-api-headers@npm:1.9.0"
+  checksum: 10c0/7702eb5218c25ff7cc96b4e342815b3bfe940cbd81f233015799e37dad4f34d34db68aa10945a5243b0c8d074f70fb88d90a553a088a52434c2343e532d50dc2
   languageName: node
   linkType: hard
 

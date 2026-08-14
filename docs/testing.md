@@ -11,6 +11,8 @@ Neither is a substitute for the other. Teleprompter's protocol is unpublished an
 
 Companion's [development-environment guidance](https://companion.free/for-developers/setting-up-developer-environment/) recommends Node 22, and this module is declared as a `node22` runtime. The repository pins the currently bundled Companion Node 22 patch release in [`.node-version`](../.node-version); its scripts refuse to run under another major version.
 
+The macOS TLS bridge is compiled under that same Node 22 runtime. It uses the pinned `node-api-headers` package rather than a machine-specific Node installation, because Companion distributes a runtime executable but not C/C++ development headers. The bridge uses stable N-API only; it does not use Node/V8 ABI-specific APIs.
+
 Install and select Node 22 with the workflow Companion recommends, then enable the pinned Yarn release:
 
 ```sh
