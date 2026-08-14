@@ -117,6 +117,12 @@ All paths start with `documents/<document UUID>/model/timing`.
 
 During the validation sequence, moving TP Controller's speed slider generated consecutive `manualSpeed` values at 0.25/0.5-sized increments. While prompting, messages also updated `keyPosition` and `keyTime`; these are telemetry and are intentionally not emitted by the module.
 
+## Segments
+
+The initial document snapshot carries segment marker names and their exact rendered playhead positions. `model.markers` supplies marker UUIDs, names, durations, and `pauseBefore` (`enabled` plus a duration); `model.markersTimingFunction` supplies ordered `keyPoints` that map each marker UUID to its visible `position`. This mapping is required because a marker's text offset is not its rendered scroll coordinate.
+
+TP Controller's **Jump to Segment**, and the full application's next/previous segment commands, do not send a marker UUID or a semantic navigation opcode. They write ordinary timing fields: retain the current `keyPosition`, set a fresh `keyTime`, and set `scrolledPosition` to the target marker key point. Segment controls must therefore parse the marker timing function, not infer coordinates from a segment name or text offset.
+
 ## CRDT behavior and limitation
 
 The payload is a `CollaborativeKit` CRDT mutation, not a stateless command. Each update carries an actor UUID plus an `index` and `ammendment` clock. The application accepted controller changes that used a monotonically increasing index count and arbitrary 64-bit actor-clock component in the capture.
