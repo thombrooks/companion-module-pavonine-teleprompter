@@ -104,6 +104,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.setFeedbackDefinitions(this.getFeedbacks())
 		this.setVariableDefinitions(this.getVariables())
 		this.setPresetDefinitions(this.getPresetStructure(), this.getPresets())
+		this.setVariableValues({ scroll_speed: '—%' })
 		this.setPlaybackState('stopped')
 		this.startDiscovery()
 		this.connect()
@@ -835,6 +836,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.config = { ...this.config, documentId }
 		this.saveConfig(this.config)
 		this.setPlaybackState(this.documentMotions.get(documentId) ?? 'stopped', true)
+		const speed = this.documentSpeeds.get(documentId)
+		if (speed !== undefined) this.setDocumentSpeed(documentId, speed)
 		this.log('info', `Automatically selected the only available document: ${this.documents.get(documentId)}`)
 	}
 	private documentId(): string {
