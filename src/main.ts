@@ -43,7 +43,6 @@ type ActionSchema = {
 	speed_down_5: { options: Record<string, never> }
 	speed_down_1: { options: Record<string, never> }
 	toggle_play_pause: { options: Record<string, never> }
-	clear_network_key: { options: Record<string, never> }
 }
 type FeedbackSchema = {
 	is_playing: { type: 'boolean'; options: Record<string, never> }
@@ -276,12 +275,6 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				options: [],
 				callback: async () => this.runReset(),
 			},
-			clear_network_key: {
-				name: 'Clear saved network key',
-				description: 'Removes the key saved in this Companion connection and reconnects. It does not change Teleprompter settings.',
-				options: [],
-				callback: async () => this.clearNetworkKey(),
-			},
 			set_speed: {
 				name: 'Set manual speed',
 				options: [{ id: 'speed', type: 'number', label: 'Speed', default: 100, min: 0, max: 1000 }],
@@ -328,7 +321,6 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				name: 'Speed',
 				definitions: ['speed_indicator', 'speed_up_5', 'speed_up_1', 'speed_down_5', 'speed_down_1'],
 			},
-			{ id: 'connection', name: 'Connection', definitions: ['clear_network_key'] },
 		]
 	}
 	private getPresets(): CompanionPresetDefinitions<ModuleSchema> {
@@ -396,11 +388,6 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			speed_up_1: this.speedPreset('Increase speed by 1%', '⌃', 'speed_up_1'),
 			speed_down_5: this.speedPreset('Decrease speed by 5%', '⌄⌄', 'speed_down_5'),
 			speed_down_1: this.speedPreset('Decrease speed by 1%', '⌄', 'speed_down_1'),
-			clear_network_key: {
-				type: 'simple', name: 'Clear saved network key', keywords: ['network', 'key', 'connection'],
-				style: { text: 'KEY\nCLEAR', size: '14', color: 0xffffff, bgcolor: 0x8b0000 },
-				steps: [{ down: [{ actionId: 'clear_network_key', options: {} }], up: [] }], feedbacks: [],
-			},
 		}
 	}
 	private speedPreset(name: string, text: string, actionId: 'speed_up_5' | 'speed_up_1' | 'speed_down_5' | 'speed_down_1') {
@@ -959,13 +946,6 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		await new Promise<void>((resolve, reject) =>
 			this.socket?.write(data, (error) => (error ? reject(error) : resolve())),
 		)
-	}
-	private async clearNetworkKey(): Promise<void> {
-		if (!this.networkKey()) return
-		this.secrets = { ...this.secrets, networkKey: '' }
-		await this.saveConfig(this.config, this.secrets)
-		this.disconnect()
-		this.connect()
 	}
 	public async destroy(): Promise<void> {
 		this.destroyed = true
