@@ -16,8 +16,16 @@ let pskData = psk.withUnsafeBytes { DispatchData(bytes: $0) as __DispatchData }
 sec_protocol_options_add_pre_shared_key(tls.securityProtocolOptions, pskData, pskData)
 sec_protocol_options_add_tls_ciphersuite(tls.securityProtocolOptions, 0x00a8)
 
-let connection = NWConnection(host: NWEndpoint.Host(CommandLine.arguments[1]), port: NWEndpoint.Port(rawValue: port)!, using: NWParameters(tls: tls))
-let queue = DispatchQueue(label: "org.bitfocus.companion.teleprompter.tls-bridge")
+let hostText = CommandLine.arguments[1]
+let host: NWEndpoint.Host
+if let address = IPv4Address(hostText) {
+	host = .ipv4(address)
+} else if let address = IPv6Address(hostText) {
+	host = .ipv6(address)
+} else {
+	host = .name(hostText, nil)
+}
+let connection = NWConnection(host: host, port: NWEndpoint.Port(rawValue: port)!, using: NWParameters(tls: tls))
 
 func fail(_ message: String) -> Never {
 	fputs("teleprompter TLS bridge: \(message)\n", stderr)
@@ -60,7 +68,7 @@ connection.stateUpdateHandler = { state in
 	default: break
 	}
 }
-connection.start(queue: queue)
+connection.start(queue: .main)
 dispatchMain()
 
 extension Data {

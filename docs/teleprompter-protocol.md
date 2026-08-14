@@ -6,7 +6,7 @@ Status: experimental; observed on macOS Teleprompter 3.1.1 (build 1514) and Tele
 
 These notes cover local control of a script you are authorized to operate. A device with network access can control a Teleprompter instance when no network key is configured, so use an isolated production VLAN and set a network key once the integration is validated.
 
-The Companion module uses Companion's Bonjour device picker to find Teleprompter instances and passively reads the document list after connecting. It requests IPv4 results to avoid duplicate IPv4/IPv6 routes in Companion's built-in picker. It does not edit scripts or retain a packet capture.
+The Companion module uses Bonjour to find Teleprompter instances and passively reads the document list after connecting. A service is merged by its UUID, not by address: one Mac can advertise the same service through Wi-Fi, Thunderbolt, USB Ethernet, and IPv6. When the resolved addresses belong to the Mac running Companion, the module prefers loopback; otherwise it retains the advertised addresses and retries them if an endpoint cannot authenticate. It does not edit scripts or retain a packet capture.
 
 ## Transport and discovery
 

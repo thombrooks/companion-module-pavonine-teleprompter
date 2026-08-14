@@ -1,6 +1,6 @@
 {
 	"name": "companion-module-pavonine-teleprompter",
-	"version": "0.5.5",
+	"version": "0.5.8",
 	"description": "Experimental Bitfocus Companion control for Pavonine Teleprompter",
 	"main": "dist/main.js",
 	"type": "module",

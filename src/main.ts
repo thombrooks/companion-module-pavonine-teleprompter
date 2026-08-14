@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import net from 'node:net'
+import { networkInterfaces } from 'node:os'
 import { resetMutation, speedMutation, transportMutation, type Motion, type TimingState } from './protocol.js'
 
 interface Config {
@@ -62,6 +63,8 @@ interface TeleprompterDevice extends Endpoint {
 	id: string
 	name: string
 	challenge?: string
+	/** All resolved Bonjour addresses, in connection preference order. */
+	hosts: string[]
 }
 
 export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
@@ -82,6 +85,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	private bonjour: Bonjour | undefined
 	private browser: Browser | undefined
 	private readonly devices = new Map<string, TeleprompterDevice>()
+	// Try every Bonjour address when a multi-interface Mac advertises one service.
+	private keyedHostIndex = 0
 	private readonly documents = new Map<string, string>()
 	private readonly documentMotions = new Map<string, Motion>()
 	private readonly documentTiming = new Map<string, TimingState>()
@@ -106,6 +111,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		const keyChanged = secrets?.networkKey !== this.secrets.networkKey
 		this.config = deviceChanged ? { ...config, documentId: '' } : config
 		this.secrets = { networkKey: secrets?.networkKey ?? '' }
+		if (deviceChanged || keyChanged) this.keyedHostIndex = 0
 		// Keep the monotonic session clock across connection/configuration changes.
 		this.documents.clear()
 		this.setPlaybackState('stopped')
@@ -196,14 +202,27 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		}
 	}
 	private addDevice(service: Service): void {
-		const host = service.addresses?.find((address) => net.isIP(address) === 4) ?? service.addresses?.[0]
-		if (!host || !service.port) return
-		const txt = service.txt as Record<string, unknown> | undefined
 		const id = service.name
 		const previous = this.devices.get(id)
+		const advertised = (service.addresses ?? []).filter((address) => net.isIP(address) !== 0)
+		const resolvedAddresses = [...new Set([...(previous?.hosts ?? []), ...advertised])]
+		if (resolvedAddresses.length === 0 || !service.port) return
+		const localAddresses = new Set(
+			Object.values(networkInterfaces())
+				.flat()
+				.flatMap((entry) => (entry ? [entry.address] : [])),
+		)
+		// Bonjour resolves a local service through every active NIC. Loopback is
+		// reliable and avoids guessing between Wi-Fi, Thunderbolt, and USB NICs.
+		const isThisComputer = resolvedAddresses.some((address) => localAddresses.has(address))
+		const hosts = isThisComputer
+			? [...new Set(['::1', '127.0.0.1', ...resolvedAddresses])]
+			: [...resolvedAddresses].sort((a, b) => net.isIP(b) - net.isIP(a))
+		const host = hosts[0]
+		const txt = service.txt as Record<string, unknown> | undefined
 		const name = this.txtString(txt?.hostname) ?? this.txtString(txt?.name) ?? previous?.name ?? service.name
 		const challenge = this.txtString(txt?.challenge)
-		this.devices.set(id, { id, name, host, port: service.port, challenge })
+		this.devices.set(id, { id, name, host, hosts, port: service.port, challenge })
 		if (!this.config.manual && !this.config.deviceId && this.devices.size === 1) {
 			this.config = { ...this.config, deviceId: id }
 			this.saveConfig(this.config)
@@ -398,8 +417,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	}
 	private connect(): void {
 		this.destroyed = false
-		if (this.socket || this.reconnectTimer) return
-		this.log('debug', `Connecting to ${this.config.deviceId || 'no selected device'}; network key present: ${this.networkKey() ? 'yes' : 'no'}`)
+		if (this.socket || this.bridge || this.reconnectTimer) return
+		this.log('info', `Connecting to ${this.config.deviceId || 'no selected device'}; network key present: ${this.networkKey() ? 'yes' : 'no'}`)
 		const endpoint = this.endpoint()
 		if (!endpoint) {
 			this.updateStatus(InstanceStatus.Connecting, 'Searching for Teleprompter')
@@ -420,7 +439,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				this.updateStatus(InstanceStatus.ConnectionFailure, 'Different Network Key')
 				return
 			}
-			this.connectKeyed(endpoint, device.id)
+			this.connectKeyed(device)
 			return
 		}
 		this.updateStatus(InstanceStatus.Connecting)
@@ -438,9 +457,12 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			if (!this.destroyed) this.scheduleReconnect()
 		})
 	}
-	private connectKeyed(endpoint: Endpoint, serviceId: string): void {
+	private connectKeyed(device: TeleprompterDevice): void {
 		this.updateStatus(InstanceStatus.Connecting, 'Connecting with network key')
-		const psk = pbkdf2Sync(this.networkKey(), serviceId, 4096, 32, 'sha256').toString('hex')
+		const hostIndex = this.keyedHostIndex % device.hosts.length
+		const endpoint: Endpoint = { host: device.hosts[hostIndex] ?? device.host, port: device.port }
+		this.log('info', `Launching keyed transport to ${endpoint.host}:${endpoint.port}`)
+		const psk = pbkdf2Sync(this.networkKey(), device.id, 4096, 32, 'sha256').toString('hex')
 		const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
 		const developmentBridge = path.join(moduleDirectory, 'teleprompter-tls-bridge')
 		const bridgePath = existsSync(developmentBridge)
@@ -469,7 +491,10 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				if (this.bridge === bridge) this.bridge = undefined
 				if (!this.destroyed) {
 					this.log('warn', `Keyed transport exited with code ${code ?? 'unknown'}`)
-					if (!state.ready) this.updateStatus(InstanceStatus.ConnectionFailure, 'Keyed connection closed before authentication completed')
+					if (!state.ready) {
+						if (device.hosts.length > 1) this.keyedHostIndex = (hostIndex + 1) % device.hosts.length
+						this.updateStatus(InstanceStatus.ConnectionFailure, 'Keyed connection closed before authentication completed')
+					}
 					this.scheduleReconnect()
 				}
 			})
