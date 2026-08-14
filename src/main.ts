@@ -129,8 +129,10 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		for (const device of [...this.devices.values()].sort((a, b) => a.name.localeCompare(b.name)))
 			deviceChoices.push({ id: device.id, label: this.deviceLabel(device) })
 		const selectedDevice = this.devices.get(this.config.deviceId)
-		const documentPlaceholder = selectedDevice && this.hasDifferentKey(selectedDevice)
-			? 'Different Network Key — enter the matching key above'
+		const documentPlaceholder = selectedDevice && selectedDevice.challenge === selectedDevice.id
+			? 'No Network Key — clear the saved key above to control this device'
+			: selectedDevice && this.hasDifferentKey(selectedDevice)
+				? 'Different Network Key — enter the matching key above'
 			: this.networkKey()
 				? 'Connecting securely — documents will appear after authentication'
 				: 'Discovering documents…'
@@ -220,7 +222,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		const isThisComputer = resolvedAddresses.some((address) => localAddresses.has(address))
 		const hosts = isThisComputer
 			? [...new Set(['::1', '127.0.0.1', ...resolvedAddresses])]
-			: [...resolvedAddresses].sort((a, b) => net.isIP(b) - net.isIP(a))
+			: [...resolvedAddresses].sort((a, b) => this.addressPreference(a) - this.addressPreference(b))
 		const host = hosts[0]
 		const txt = service.txt as Record<string, unknown> | undefined
 		const name = this.txtString(txt?.hostname) ?? this.txtString(txt?.name) ?? previous?.name ?? service.name
@@ -235,7 +237,16 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	}
 	private networkKey(): string { return this.secrets.networkKey.trim() }
 	private deviceLabel(device: TeleprompterDevice): string {
+		if (device.challenge === device.id) return `(No Network Key) ${device.name}`
 		return this.hasDifferentKey(device) ? `(Different Network Key) ${device.name}` : device.name
+	}
+	private addressPreference(address: string): number {
+		// IPv4 is routable without interface metadata. IPv6 link-local addresses
+		// require a scope ID (for example `%en0`), which Bonjour's JS resolver does
+		// not expose, so leave them as a last-resort fallback.
+		if (net.isIP(address) === 4) return 0
+		if (net.isIP(address) === 6 && !address.toLowerCase().startsWith('fe80:')) return 1
+		return 2
 	}
 	private hasDifferentKey(device: TeleprompterDevice): boolean {
 		const key = this.networkKey()
