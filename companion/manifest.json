@@ -10,8 +10,8 @@
 	"keywords": ["teleprompter", "prompting", "script"],
 	"version": "0.0.0",
 	"license": "MIT",
-	"repository": "git+https://github.com/your-account/companion-module-pavonine-teleprompter.git",
-	"bugs": "https://github.com/your-account/companion-module-pavonine-teleprompter/issues",
+	"repository": "git+https://github.com/thombrooks/companion-module-pavonine-teleprompter.git",
+	"bugs": "https://github.com/thombrooks/companion-module-pavonine-teleprompter/issues",
 	"maintainers": [{ "name": "Local developer", "email": "developer@example.invalid" }],
 	"legacyIds": [],
 	"runtime": {

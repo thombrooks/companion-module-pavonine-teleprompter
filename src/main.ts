@@ -9,7 +9,7 @@ import {
 	type CompanionVariableDefinitions,
 } from '@companion-module/base'
 import Bonjour, { type Browser, type Service } from 'bonjour-service'
-import { createHash, pbkdf2Sync } from 'node:crypto'
+import { pbkdf2Sync } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
@@ -17,6 +17,10 @@ import { createRequire } from 'node:module'
 import net from 'node:net'
 import { networkInterfaces } from 'node:os'
 import { resetMutation, speedMutation, transportMutation, type Motion, type TimingState } from './protocol.js'
+import { automaticallySelectedDocument, clampManualSpeed, documentStatus, estimateTiming, hasDifferentNetworkKey, preferredHosts, selectedDocumentAfterDeviceChange, speedLabel } from './state.js'
+import { decodeFrames } from './stream.js'
+import { keyedConnectionLog, maySendTransport } from './guards.js'
+import { isUnsetValue, removedDocumentId } from './crdt.js'
 const nodeRequire = createRequire(import.meta.url)
 type NativeTlsAddon = { start(host: string, port: string, psk: Buffer, ready: () => void, data: (data: Buffer) => void, error: (message: string) => void): unknown; send(connection: unknown, data: Buffer): void }
 
@@ -27,6 +31,7 @@ interface Config {
 	host: string
 	port: number
 	documentId: string
+	documentName: string
 }
 interface Secrets {
 	[key: string]: string | number | boolean | null
@@ -47,8 +52,9 @@ type ActionSchema = {
 type FeedbackSchema = {
 	is_playing: { type: 'boolean'; options: Record<string, never> }
 	is_reverse_playing: { type: 'boolean'; options: Record<string, never> }
+	is_document_ready: { type: 'boolean'; options: Record<string, never> }
 }
-type VariableSchema = { playback_state: string; scroll_speed: string }
+type VariableSchema = { playback_state: string; scroll_speed: string; document_status: string }
 type ModuleSchema = {
 	config: Config
 	secrets: Secrets
@@ -69,7 +75,7 @@ interface TeleprompterDevice extends Endpoint {
 }
 
 export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
-	private config: Config = { deviceId: '', manual: false, host: '', port: 65330, documentId: '' }
+	private config: Config = { deviceId: '', manual: false, host: '', port: 65330, documentId: '', documentName: '' }
 	private secrets: Secrets = { networkKey: '' }
 	// Teleprompter compares this app-wide CRDT revision before the actor clock.
 	// A reinstall loses module-local state, so use a millisecond epoch clock: it
@@ -96,15 +102,17 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	private readonly timerNeedsStart = new Set<string>()
 	private playbackStartedAt: number | undefined
 	private motion: Motion = 'stopped'
+	private connectionActive = false
 
 	public async init(config: Config, _isFirstInit: boolean, secrets: Secrets): Promise<void> {
-		this.config = config
+		this.config = { ...config, documentName: config.documentName ?? '' }
 		this.secrets = { networkKey: secrets?.networkKey ?? '' }
 		this.setActionDefinitions(this.getActions())
 		this.setFeedbackDefinitions(this.getFeedbacks())
 		this.setVariableDefinitions(this.getVariables())
 		this.setPresetDefinitions(this.getPresetStructure(), this.getPresets())
 		this.setVariableValues({ scroll_speed: '—%' })
+		this.updateDocumentStatus()
 		this.setPlaybackState('stopped')
 		this.startDiscovery()
 		this.connect()
@@ -112,11 +120,16 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	public async configUpdated(config: Config, secrets: Secrets): Promise<void> {
 		const deviceChanged = config.deviceId !== this.config.deviceId || config.manual !== this.config.manual
 		const keyChanged = secrets?.networkKey !== this.secrets.networkKey
-		this.config = deviceChanged ? { ...config, documentId: '' } : config
+		const documentId = selectedDocumentAfterDeviceChange(this.config.deviceId, config.deviceId, config.documentId)
+		const documentName = deviceChanged
+			? ''
+			: config.documentName || (documentId === this.config.documentId ? this.config.documentName : this.documents.get(documentId) ?? '')
+		this.config = { ...config, documentId, documentName }
 		this.secrets = { networkKey: secrets?.networkKey ?? '' }
 		if (deviceChanged || keyChanged) this.keyedHostIndex = 0
 		// Keep the monotonic session clock across connection/configuration changes.
 		this.documents.clear()
+		this.updateDocumentStatus()
 		this.setPlaybackState('stopped')
 		if (deviceChanged) this.saveConfig(this.config)
 		this.disconnect()
@@ -223,10 +236,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		)
 		// Bonjour resolves a local service through every active NIC. Loopback is
 		// reliable and avoids guessing between Wi-Fi, Thunderbolt, and USB NICs.
-		const isThisComputer = resolvedAddresses.some((address) => localAddresses.has(address))
-		const hosts = isThisComputer
-			? [...new Set(['::1', '127.0.0.1', ...resolvedAddresses])]
-			: [...resolvedAddresses].sort((a, b) => this.addressPreference(a) - this.addressPreference(b))
+		const hosts = preferredHosts(resolvedAddresses, localAddresses)
 		const host = hosts[0]
 		const txt = service.txt as Record<string, unknown> | undefined
 		const name = this.txtString(txt?.hostname) ?? this.txtString(txt?.name) ?? previous?.name ?? service.name
@@ -244,21 +254,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		if (device.challenge === device.id) return `(No Network Key) ${device.name}`
 		return this.hasDifferentKey(device) ? `(Different Network Key) ${device.name}` : device.name
 	}
-	private addressPreference(address: string): number {
-		// IPv4 is routable without interface metadata. IPv6 link-local addresses
-		// require a scope ID (for example `%en0`), which Bonjour's JS resolver does
-		// not expose, so leave them as a last-resort fallback.
-		if (net.isIP(address) === 4) return 0
-		if (net.isIP(address) === 6 && !address.toLowerCase().startsWith('fe80:')) return 1
-		return 2
-	}
 	private hasDifferentKey(device: TeleprompterDevice): boolean {
-		const key = this.networkKey()
-		if (!device.challenge) return false
-		if (!key) return device.challenge !== device.id
-		const material = pbkdf2Sync(key, device.id, 4096, 32, 'sha256')
-		const expected = createHash('sha256').update(material).digest('base64')
-		return device.challenge !== expected
+		return hasDifferentNetworkKey(this.networkKey(), device.id, device.challenge)
 	}
 	private txtString(value: unknown): string | undefined {
 		if (typeof value === 'string') return value
@@ -321,17 +318,26 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				defaultStyle: { bgcolor: 0x00aa00, color: 0xffffff, text: 'REV' },
 				callback: () => this.motion === 'reverse',
 			},
+			is_document_ready: {
+				type: 'boolean',
+				name: 'Selected document is ready',
+				description: 'True when connected and the selected document is currently advertised by Teleprompter.',
+				options: [],
+				defaultStyle: { bgcolor: 0x00aa00, color: 0xffffff },
+				callback: () => this.connectionActive && this.documents.has(this.config.documentId),
+			},
 		}
 	}
 	private getVariables(): CompanionVariableDefinitions<VariableSchema> {
 		return {
 			playback_state: { name: 'Playback state (Playing, Paused, or Reverse)' },
 			scroll_speed: { name: 'Current scroll speed' },
+			document_status: { name: 'Selected document connection status' },
 		}
 	}
 	private getPresetStructure(): CompanionPresetSection<ModuleSchema>[] {
 		return [
-			{ id: 'transport', name: 'Transport', definitions: ['play_pause_toggle', 'reverse', 'stop_reset'] },
+			{ id: 'transport', name: 'Transport', definitions: ['play_pause_toggle', 'reverse', 'stop_reset', 'document_status'] },
 			{
 				id: 'speed',
 				name: 'Speed',
@@ -372,6 +378,14 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				},
 				steps: [{ down: [{ actionId: 'stop_reset', options: {} }], up: [] }],
 				feedbacks: [],
+			},
+			document_status: {
+				type: 'simple',
+				name: 'Current document (indicator)',
+				keywords: ['document', 'connection', 'status', 'indicator'],
+				style: { text: '$(pavonine-teleprompter:document_status)', size: '14', color: 0xffffff, bgcolor: 0x8b0000 },
+				steps: [{ down: [], up: [] }],
+				feedbacks: [{ feedbackId: 'is_document_ready', options: {}, style: { bgcolor: 0x006400 } }],
 			},
 			reverse: {
 				type: 'simple',
@@ -455,6 +469,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		socket.on('connect', () => this.connected())
 		socket.on('data', (data) => this.receive(data))
 		socket.on('error', (error) => {
+			this.connectionActive = false
+			this.updateDocumentStatus()
 			this.updateStatus(InstanceStatus.ConnectionFailure, `Connection error: ${error.message}`)
 			this.log('warn', `Teleprompter connection error: ${error.message}`)
 		})
@@ -468,7 +484,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.keyedDataReceived = false
 		const hostIndex = this.keyedHostIndex % device.hosts.length
 		const endpoint: Endpoint = { host: device.hosts[hostIndex] ?? device.host, port: device.port }
-		this.log('info', `Launching keyed transport to ${endpoint.host}:${endpoint.port}`)
+		this.log('info', keyedConnectionLog(endpoint.host, endpoint.port, true))
 		const psk = pbkdf2Sync(this.networkKey(), device.id, 4096, 32, 'sha256').toString('hex')
 		const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
 		const addonPath = existsSync(path.join(moduleDirectory, 'teleprompter-tls-addon.node'))
@@ -486,6 +502,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				}
 				this.receive(data)
 			}, (message) => {
+				this.connectionActive = false
+				this.updateDocumentStatus()
 				this.log('warn', `Keyed transport error: ${message}`)
 				this.updateStatus(InstanceStatus.ConnectionFailure, 'Keyed connection failed')
 			})
@@ -496,7 +514,9 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		}
 	}
 	private connected(): void {
+		this.connectionActive = true
 		this.updateStatus(InstanceStatus.Ok, 'Discovering documents')
+		this.updateDocumentStatus()
 		this.noDocumentTimer = setTimeout(() => {
 			if (this.documents.size === 0 && (this.socket || this.bridge))
 				this.updateStatus(InstanceStatus.UnknownWarning, 'Connected, but Teleprompter has not sent its document list')
@@ -504,6 +524,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		if (!this.networkKey()) this.scheduleDocumentRefresh()
 	}
 	private disconnect(): void {
+		this.connectionActive = false
 		if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
 		if (this.noDocumentTimer) clearTimeout(this.noDocumentTimer)
 		if (this.documentRefreshTimer) clearTimeout(this.documentRefreshTimer)
@@ -514,10 +535,13 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.socket = undefined
 		this.bridge = undefined
 		this.receiveBuffer = Buffer.alloc(0)
+		this.updateDocumentStatus()
 	}
 	private scheduleReconnect(): void {
 		if (this.reconnectTimer) return
 		this.updateStatus(InstanceStatus.ConnectionFailure, 'Connection closed; retrying')
+		this.connectionActive = false
+		this.updateDocumentStatus()
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = undefined
 			this.connect()
@@ -579,18 +603,14 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		})
 	}
 	private receive(data: Buffer): void {
-		this.receiveBuffer = Buffer.concat([this.receiveBuffer, data])
-		while (this.receiveBuffer.length >= 8) {
-			const length = this.receiveBuffer.readBigUInt64LE()
-			if (length > BigInt(Number.MAX_SAFE_INTEGER)) {
-				this.log('warn', 'Ignoring an impossibly large Teleprompter frame')
-				this.disconnect()
-				return
-			}
-			const end = 8 + Number(length)
-			if (this.receiveBuffer.length < end) return
-			const payload = this.receiveBuffer.subarray(8, end)
-			this.receiveBuffer = this.receiveBuffer.subarray(end)
+		const decoded = decodeFrames(Buffer.concat([this.receiveBuffer, data]))
+		if (decoded.impossibleLength) {
+			this.log('warn', 'Ignoring an impossibly large Teleprompter frame')
+			this.disconnect()
+			return
+		}
+		this.receiveBuffer = Buffer.from(decoded.remainder)
+		for (const payload of decoded.frames) {
 			if (payload.length === 0) continue
 			try {
 				const message = JSON.parse(payload.toString('utf8'))
@@ -617,6 +637,11 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			if (!Array.isArray(node)) return
 			for (let index = 0; index < node.length; index += 1) {
 				const value = node[index]
+				// Closing a document is an unset at the document root, rather than
+				// an update to its name. Treat it as authoritative so a subsequently
+				// opened document cannot leave a stale UUID selected in Companion.
+				const removedDocument = removedDocumentId(value, node[index + 1])
+				if (removedDocument) this.removeDocument(removedDocument)
 				if (this.isMotionPath(value)) {
 					const motion = this.findTimingMotion(node[index + 1]) ?? 'stopped'
 					this.documentMotions.set(value[1], motion)
@@ -637,14 +662,16 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					const speed = this.findTypedNumber(node[index + 1], 'Double')
 					if (speed !== undefined) this.setDocumentSpeed(value[1], speed)
 				}
-				if (this.isTimerStartPath(value) && this.isUnsetValue(node[index + 1])) this.timerNeedsStart.add(value[1])
+				if (this.isTimerStartPath(value) && isUnsetValue(node[index + 1])) this.timerNeedsStart.add(value[1])
 				if (this.isDocumentNamePath(value)) {
 					const name = this.findStringValue(node[index + 1])
 					if (name && this.documents.get(value[1]) !== name) {
 						this.documents.set(value[1], name)
+						this.rememberOrRestoreDocument(value[1], name)
 						if (this.noDocumentTimer) clearTimeout(this.noDocumentTimer)
 						this.updateStatus(InstanceStatus.Ok, `Found ${this.documents.size} document(s)`)
 						this.selectOnlyDocument()
+						this.updateDocumentStatus()
 					}
 				}
 				visit(value)
@@ -658,9 +685,11 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		for (const [documentId, name] of documents) {
 			if (this.documents.get(documentId) !== name) {
 				this.documents.set(documentId, name)
+				this.rememberOrRestoreDocument(documentId, name)
 				if (this.noDocumentTimer) clearTimeout(this.noDocumentTimer)
 				this.updateStatus(InstanceStatus.Ok, `Found ${this.documents.size} document(s)`)
 				this.selectOnlyDocument()
+				this.updateDocumentStatus()
 			}
 		}
 	}
@@ -695,7 +724,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 								keyTime: keyTime ?? this.documentTiming.get(documentId)?.keyTime ?? 0,
 							})
 						}
-						if (this.isUnsetValue(timerInfo?.timerStart)) this.timerNeedsStart.add(documentId)
+						if (isUnsetValue(timerInfo?.timerStart)) this.timerNeedsStart.add(documentId)
 						if (speed !== undefined) this.setDocumentSpeed(documentId, speed)
 						const motion = this.findTimingMotion(timing?.motion) ?? 'stopped'
 						this.documentMotions.set(documentId, motion)
@@ -716,12 +745,23 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		if (!changed) return
 		this.documents.clear()
 		for (const [documentId, name] of documents) this.documents.set(documentId, name)
-		if (this.config.documentId && !this.documents.has(this.config.documentId)) {
-			this.config = { ...this.config, documentId: '' }
-			this.saveConfig(this.config)
-		}
+		for (const [documentId, name] of this.documents) this.rememberOrRestoreDocument(documentId, name)
 		this.updateStatus(InstanceStatus.Ok, `Found ${this.documents.size} document(s)`)
 		this.selectOnlyDocument()
+		this.updateDocumentStatus()
+	}
+	private removeDocument(documentId: string): void {
+		const removed = this.documents.delete(documentId)
+		this.documentMotions.delete(documentId)
+		this.documentTiming.delete(documentId)
+		this.documentSpeeds.delete(documentId)
+		this.timerNeedsStart.delete(documentId)
+		if (this.config.documentId === documentId) {
+			this.setPlaybackState('stopped', true)
+			this.setVariableValues({ scroll_speed: '' })
+		}
+		if (removed) this.updateStatus(InstanceStatus.Ok, `Found ${this.documents.size} document(s)`)
+		this.updateDocumentStatus()
 	}
 	private findCrdtObject(value: unknown): Record<string, unknown> | undefined {
 		if (!Array.isArray(value)) return undefined
@@ -787,11 +827,6 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			value[4] === 'manualSpeed'
 		)
 	}
-	private isUnsetValue(value: unknown): boolean {
-		if (!Array.isArray(value)) return false
-		if (value.length === 1 && value[0] === 1) return true
-		return value.some((child) => this.isUnsetValue(child))
-	}
 	private findStringValue(value: unknown): string | undefined {
 		if (!Array.isArray(value)) return undefined
 		if (value[0] === 'String' && typeof value[1] === 'string') return value[1]
@@ -843,20 +878,46 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	private setDocumentSpeed(documentId: string, speed: number): void {
 		this.documentSpeeds.set(documentId, speed)
 		if (documentId === this.config.documentId)
-			this.setVariableValues({ scroll_speed: `${Math.round(Math.max(0, Math.min(500, speed)) / 5)}%` })
+			this.setVariableValues({ scroll_speed: speedLabel(speed) })
 	}
 	private selectOnlyDocument(): void {
-		if (this.documents.size !== 1 || this.config.documentId) return
-		const [documentId] = this.documents.keys()
-		this.config = { ...this.config, documentId }
+		const documentId = automaticallySelectedDocument(this.documents, this.config.documentId)
+		if (!documentId) return
+		this.config = { ...this.config, documentId, documentName: this.documents.get(documentId) ?? '' }
 		this.saveConfig(this.config)
 		this.setPlaybackState(this.documentMotions.get(documentId) ?? 'stopped', true)
 		const speed = this.documentSpeeds.get(documentId)
 		if (speed !== undefined) this.setDocumentSpeed(documentId, speed)
 		this.log('info', `Automatically selected the only available document: ${this.documents.get(documentId)}`)
+		this.updateDocumentStatus()
+	}
+	private rememberOrRestoreDocument(documentId: string, name: string): void {
+		if (documentId === this.config.documentId && this.config.documentName !== name) {
+			this.config = { ...this.config, documentName: name }
+			this.saveConfig(this.config)
+			return
+		}
+		// A deliberately closed/reopened file can be represented by a new CRDT
+		// UUID. Reassociate only when the old selected UUID is absent and exactly
+		// one currently advertised file has the saved name.
+		if (
+			this.config.documentId &&
+			!this.documents.has(this.config.documentId) &&
+			this.config.documentName === name &&
+			[...this.documents.values()].filter((candidate) => candidate === name).length === 1
+		) {
+			this.config = { ...this.config, documentId }
+			this.saveConfig(this.config)
+			this.log('info', `Restored saved document selection: ${name}`)
+		}
+	}
+	private updateDocumentStatus(): void {
+		this.setVariableValues({ document_status: documentStatus(this.connectionActive, this.documents, this.config.documentId, this.config.documentName) })
+		this.checkFeedbacks('is_document_ready')
 	}
 	private documentId(): string {
 		if (!this.config.documentId) throw new Error('Select a document after it has been discovered')
+		if (!this.documents.has(this.config.documentId)) throw new Error('The selected document is closed or unavailable; command not sent')
 		return this.config.documentId.toUpperCase()
 	}
 	private nextSequence(): bigint {
@@ -887,7 +948,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	}
 	private async runTransport(motion: Motion): Promise<void> {
 		try {
-			if (!(await this.refreshDocuments()))
+			if (!maySendTransport(await this.refreshDocuments(), this.config.documentId))
 				throw new Error('Unable to synchronize the Teleprompter position; command not sent')
 			const { data, documentId, timing } = this.transport(motion)
 			this.log('info', `Transport action requested: ${motion}; writing ${data.length} bytes`)
@@ -932,7 +993,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		const documentId = this.documentId()
 		const current = this.documentSpeeds.get(documentId)
 		if (current === undefined) throw new Error('Teleprompter did not provide its current speed; command not sent')
-		const next = Math.max(0, Math.min(500, current + percentDelta * 5))
+		const next = clampManualSpeed(current + percentDelta * 5)
 		await this.send(speedMutation(documentId, next, this.nextSequence()))
 		this.setDocumentSpeed(documentId, next)
 	}
@@ -942,12 +1003,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		// TP Controller moves approximately one document point per second for
 		// each manualSpeed unit (for example manualSpeed 200 measured ~200 pts/s).
 		// This estimate is used only to make Pause preserve the current location.
-		const direction = this.motion === 'reverse' ? -1 : 1
-		const rate = this.documentSpeeds.get(documentId) ?? 100
-		return {
-			...timing,
-			keyPosition: Math.max(0, timing.keyPosition + direction * ((Date.now() - this.playbackStartedAt) / 1000) * rate),
-		}
+		return estimateTiming(timing, this.motion, this.documentSpeeds.get(documentId) ?? 100, this.playbackStartedAt, Date.now())
 	}
 	private commitEstimatedPosition(): void {
 		if (!this.config.documentId) return

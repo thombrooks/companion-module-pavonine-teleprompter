@@ -18,7 +18,7 @@ Bonjour can send the SRV/TXT record before its A/AAAA address record, particular
 
 There is an 8-byte keepalive frame containing a zero little-endian length. It is sent by both sides while the controller is attached.
 
-The Bonjour service type and TXT-record schema have not yet been isolated from a quiet capture. Configure the target manually for now.
+The service type is `_teleprompter3._tcp`. The module uses its UUID/challenge record to merge duplicate interface announcements and its `hostname` TXT record for the device picker. Manual host/port configuration remains only as a Bonjour fallback.
 
 ## Frame format
 
@@ -74,7 +74,7 @@ Node's built-in TLS client cannot emit the required arbitrary binary PSK identit
 
 ### Companion runtime constraint (observed)
 
-This module can use plain TCP when no network key is configured. The keyed transport itself was verified independently on macOS: a small `Network.framework` bridge authenticated and received the full state frame, including a document name. Companion's module host disables both spawned processes and native addons by default. API 1.12 provides explicit module permissions for these capabilities.
+This module can use plain TCP when no network key is configured. Its keyed transport uses a bundled macOS N-API addon backed by `Network.framework`; it authenticates and receives the full state frame, including document names. Companion's module host disables both spawned processes and native addons by default. API 1.12 provides explicit module permissions for these capabilities.
 
 - A bundled N-API addon and its linked Swift/Network.framework library are rejected without the manifest permission, with: `Cannot load native addon because loading addons is disabled.`
 - The module declares `runtime.permissions.native-addons: true` so Companion can enable this supported, prebuilt native dependency.
@@ -92,6 +92,14 @@ documents/<DOCUMENT-UUID>/name = [2, ["String", "filename.tp3"]]
 The selection capture recorded `my_new_doc.tp3` at UUID `752D7CFC-A9FC-4485-81E8-35DCBCEBF9FF` (and a separate `sample.tp3` at `389C24F5-2701-4E38-A726-23B1807341D6`). The module uses these records to populate its Document picker; users should never need to copy these UUIDs.
 
 An initial connection can instead receive a full CRDT snapshot. In that form, each document object includes sibling `name` and `uuid` CRDT values, for example `"name":[[2,["String","my_new_doc.tp3"]],…]` and `"uuid":[[2,["UUID","752D…"]],…]`. The module handles both the snapshot and incremental forms.
+
+Closing a document is an incremental root-map unset, rather than a name change:
+
+```text
+documents/<DOCUMENT-UUID> = [1]
+```
+
+Controllers should remove that document and clear the selection if it was selected. Reopening a file can advertise it as a fresh document UUID, so retaining the old UUID causes controls to target a document that no longer exists.
 
 The integer clock components are 64-bit values. JavaScript must serialize them as decimal literals rather than IEEE-754 numbers; the module does this with `BigInt` converted to a string before composing the JSON.
 
