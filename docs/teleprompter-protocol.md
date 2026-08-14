@@ -68,9 +68,16 @@ The TLS PSK and TLS PSK identity are both the raw bytes `P`. Bonjour advertises:
 challenge = Base64(SHA-256(P))
 ```
 
-For the test key `FOOBAR` and service UUID `EC3202A4-2424-4C20-A5C7-62567212F8E0`, `P` was `42a60486dee124f47297fecea81d474e4356d07de9afbc670fba9186098a30a9` and the advertised challenge was `qvO2roJxi64o1F/Ck6QdFlo/0oo9TfIxpQvpyUj1w1I=`.
-
 Node's built-in TLS client cannot emit the required arbitrary binary PSK identity. On macOS, use `Network.framework` / `sec_protocol_options_add_pre_shared_key` for keyed connections. A companion UI should store the optional key locally, filter discovery by the derived `challenge`, and reconnect whenever that field is changed or cleared. It must never attempt to alter the Teleprompter application's own network-key setting.
+
+### Companion runtime constraint (observed)
+
+This module can use plain TCP when no network key is configured. The keyed transport itself was verified independently on macOS: a small `Network.framework` bridge authenticated and received the full state frame, including a document name. It cannot presently run *inside* Companion 5.0.3's user-module host:
+
+- `child_process.spawn()` never emits a child-process event when invoked by the module host, so a bundled executable bridge cannot be used.
+- A bundled N-API addon and its linked Swift/Network.framework library load in Companion's standalone Node runtime but are rejected by the module host with: `Cannot load native addon because loading addons is disabled.`
+
+Therefore, Companion's user-module sandbox currently prevents the only known macOS implementation of this binary-identity TLS-PSK protocol. The module must report this limitation clearly rather than leave the document picker in a perpetual authentication state. A future solution requires either native-addon support in Companion, a supported Companion-managed native helper mechanism, or a separately installed user-authorized local bridge service.
 
 ## Document discovery
 
@@ -130,5 +137,5 @@ Do not commit captures: they can contain script text, document IDs, device names
 ## Next research steps
 
 - Verify a generated mutation from the module against a sacrificial script, one action at a time.
-- Integrate the verified macOS TLS-PSK transport for configured network keys.
+- Investigate a supported Companion mechanism for a local native TLS-PSK bridge; native addons and spawned executable helpers are disabled in the current user-module host.
 - Add passive state parsing, feedbacks, and presets only after mutation reliability is proven.

@@ -10,13 +10,15 @@ import {
 } from '@companion-module/base'
 import Bonjour, { type Browser, type Service } from 'bonjour-service'
 import { createHash, pbkdf2Sync } from 'node:crypto'
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import net from 'node:net'
 import { networkInterfaces } from 'node:os'
 import { resetMutation, speedMutation, transportMutation, type Motion, type TimingState } from './protocol.js'
+const nodeRequire = createRequire(import.meta.url)
+type NativeTlsAddon = { start(host: string, port: string, psk: Buffer, ready: () => void, data: (data: Buffer) => void, error: (message: string) => void): unknown; send(connection: unknown, data: Buffer): void }
 
 interface Config {
 	[key: string]: string | number | boolean | null
@@ -75,7 +77,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	// is safe as an IEEE-754 integer and newer than prior controller sessions.
 	private sequence = BigInt(Date.now())
 	private socket: net.Socket | undefined
-	private bridge: ChildProcessWithoutNullStreams | undefined
+	private bridge: unknown
 	private keyedDataReceived = false
 	private receiveBuffer = Buffer.alloc(0)
 	private reconnectTimer: NodeJS.Timeout | undefined
@@ -466,64 +468,28 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.log('info', `Launching keyed transport to ${endpoint.host}:${endpoint.port}`)
 		const psk = pbkdf2Sync(this.networkKey(), device.id, 4096, 32, 'sha256').toString('hex')
 		const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
-		const developmentBridge = path.join(moduleDirectory, 'teleprompter-tls-bridge')
-		const bridgePath = existsSync(developmentBridge)
-			? developmentBridge
-			: path.join(moduleDirectory, 'companion', 'teleprompter-tls-bridge')
+		const addonPath = existsSync(path.join(moduleDirectory, 'teleprompter-tls-addon.node'))
+			? path.join(moduleDirectory, 'teleprompter-tls-addon.node')
+			: path.join(moduleDirectory, 'companion', 'teleprompter-tls-addon.node')
 		try {
-			// Companion's module host can stall when it directly launches a bundled
-			// Mach-O executable. Launching through the system shell gives the helper
-			// normal process setup while `exec` preserves the stdin/stdout bridge.
-			const bridge = spawn('/bin/sh', [
-				'-c',
-				'exec "$@"',
-				'teleprompter-tls-bridge',
-				bridgePath,
-				endpoint.host,
-				String(endpoint.port),
-				psk,
-			])
-			this.bridge = bridge
-			const state = { ready: false }
-			bridge.on('spawn', () => this.log('info', 'Keyed transport process started'))
-			bridge.stdout.on('data', (data: Buffer) => {
+			const addon = nodeRequire(addonPath) as NativeTlsAddon
+			this.bridge = addon.start(endpoint.host, String(endpoint.port), Buffer.from(psk, 'hex'), () => {
+				this.log('info', 'Keyed Teleprompter transport authenticated')
+				this.connected()
+			}, (data) => {
 				if (!this.keyedDataReceived) {
 					this.keyedDataReceived = true
 					this.log('info', `Received ${data.length} bytes of encrypted Teleprompter state`)
 				}
 				this.receive(data)
-			})
-			bridge.stderr.on('data', (data: Buffer) => {
-				const message = data.toString('utf8').trim()
-				if (message === 'READY') {
-					state.ready = true
-					this.log('info', 'Keyed Teleprompter transport authenticated')
-					this.connected()
-				} else if (message) {
-					this.log('warn', message)
-					if (message.startsWith('WAITING:')) this.updateStatus(InstanceStatus.Connecting, `Keyed connection waiting: ${message.slice(9)}`)
-				}
-			})
-			bridge.on('error', (error) => {
-				this.log('error', `Unable to start keyed transport at ${bridgePath}: ${error.message}`)
-				this.updateStatus(InstanceStatus.ConnectionFailure, `Keyed connection error: ${error.message}`)
-			})
-			bridge.on('exit', (code) => {
-				if (this.bridge === bridge) this.bridge = undefined
-				if (!this.destroyed) {
-					this.log('warn', `Keyed transport exited with code ${code ?? 'unknown'}`)
-					if (!state.ready) {
-						if (device.hosts.length > 1) this.keyedHostIndex = (hostIndex + 1) % device.hosts.length
-						this.updateStatus(InstanceStatus.ConnectionFailure, 'Keyed connection closed before authentication completed')
-					}
-					this.scheduleReconnect()
-				}
-			})
-			bridge.on('close', (code, signal) => {
-				this.log('warn', `Keyed transport process closed (${code ?? signal ?? 'unknown'})`)
+			}, (message) => {
+				this.log('warn', `Keyed transport error: ${message}`)
+				this.updateStatus(InstanceStatus.ConnectionFailure, 'Keyed connection failed')
 			})
 		} catch (error) {
-			this.updateStatus(InstanceStatus.ConnectionFailure, `Unable to start keyed transport: ${(error as Error).message}`)
+			const message = (error as Error).message
+			this.log('error', `Unable to load keyed transport: ${message}`)
+			this.updateStatus(InstanceStatus.ConnectionFailure, `Unable to start keyed transport: ${message}`)
 		}
 	}
 	private connected(): void {
@@ -543,7 +509,6 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.documentRefreshTimer = undefined
 		this.socket?.destroy()
 		this.socket = undefined
-		this.bridge?.kill()
 		this.bridge = undefined
 		this.receiveBuffer = Buffer.alloc(0)
 	}
@@ -984,8 +949,11 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.documentTiming.set(this.config.documentId, this.currentTiming(this.config.documentId))
 	}
 	private async send(data: Buffer): Promise<void> {
-		if (this.bridge?.stdin.writable) {
-			return new Promise((resolve, reject) => this.bridge?.stdin.write(data, (error) => (error ? reject(error) : resolve())))
+		if (this.bridge) {
+			const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
+			const addon = nodeRequire(path.join(moduleDirectory, 'companion', 'teleprompter-tls-addon.node')) as NativeTlsAddon
+			addon.send(this.bridge, data)
+			return
 		}
 		if (!this.socket || this.socket.destroyed || !this.socket.writable) throw new Error('Teleprompter is not connected')
 		await new Promise<void>((resolve, reject) =>
