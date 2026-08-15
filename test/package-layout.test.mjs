@@ -13,6 +13,10 @@ test('the distributable runtime files required for keyed transport are present',
 		'prebuilds/teleprompter-tls-addon-darwin-arm64/node-napi-v10.node',
 		'prebuilds/teleprompter-tls-addon-darwin-x64/node-napi-v10.node',
 		'prebuilds/teleprompter-tls-addon-darwin-x64/libteleprompter_tls_native.dylib',
+		'prebuilds/teleprompter-tls-addon-linux-arm64/node-napi-v10.node',
+		'prebuilds/teleprompter-tls-addon-linux-x64/node-napi-v10.node',
+		'prebuilds/teleprompter-tls-addon-win32-arm64/node-napi-v10.node',
+		'prebuilds/teleprompter-tls-addon-win32-x64/node-napi-v10.node',
 	])
 		assert.equal(existsSync(path.join(root, file)), true, `${file} must be bundled`)
 	const manifest = JSON.parse(readFileSync(path.join(root, 'companion/manifest.json'), 'utf8'))
@@ -42,6 +46,7 @@ test('the native addon build uses pinned stable N-API headers under Node 22', ()
 	assert.match(buildScript, /--target teleprompter_tls_addon/)
 	assert.match(buildScript, /-DPython3_EXECUTABLE/)
 	assert.match(buildScript, /CLANG_MODULE_CACHE_PATH/)
+	assert.match(buildScript, /build_dir_relative/)
 	assert.match(buildScript, /-install_name -Xlinker @rpath\/libteleprompter_tls_native\.dylib/)
 	assert.match(buildScript, /pkg-prebuilds-copy/)
 	assert.match(buildScript, /--napi_version 10/)

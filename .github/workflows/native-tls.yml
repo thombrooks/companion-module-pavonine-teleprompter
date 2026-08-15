@@ -125,9 +125,6 @@ jobs:
           - arch: arm64
             compiler: aarch64-linux-gnu
             processor: aarch64
-          - arch: arm
-            compiler: arm-linux-gnueabihf
-            processor: armv7l
     steps:
       - uses: actions/checkout@v4
         with:

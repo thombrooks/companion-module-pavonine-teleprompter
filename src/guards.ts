@@ -13,11 +13,19 @@ export function keyedConnectionLog(host: string, port: number, keyPresent: boole
 	return `Connecting to ${host}:${port}; network key present: ${keyPresent ? 'yes' : 'no'}`
 }
 
+function hasBundledNativeTlsPrebuild(platform: string, arch: string): boolean {
+	return (
+		(platform === 'darwin' && (arch === 'arm64' || arch === 'x64')) ||
+		(platform === 'linux' && (arch === 'arm64' || arch === 'x64')) ||
+		(platform === 'win32' && (arch === 'arm64' || arch === 'x64'))
+	)
+}
+
 /** A keyed connection is enabled only when this package actually contains its native prebuild. */
 export function keyedTransportUnsupportedMessage(
 	platform = process.platform,
 	arch = process.arch,
-	prebuildAvailable = platform === 'darwin' && (arch === 'arm64' || arch === 'x64'),
+	prebuildAvailable = hasBundledNativeTlsPrebuild(platform, arch),
 ): string | undefined {
 	if (prebuildAvailable) return undefined
 	if (platform !== 'darwin')
