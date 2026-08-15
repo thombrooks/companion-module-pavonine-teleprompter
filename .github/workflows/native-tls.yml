@@ -173,6 +173,8 @@ jobs:
   darwin:
     name: darwin-${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -194,13 +196,13 @@ jobs:
       - name: Install JavaScript dependencies
         run: corepack enable && yarn install --immutable
       - name: Install Mbed TLS build dependencies
-        run: python -m pip install -r scripts/requirements-mbedtls.txt
+        run: python3 -m pip install -r scripts/requirements-mbedtls.txt
       - name: Compile portable TLS addon
         run: |
           cmake -S native -B native-build \
             -DNODE_API_INCLUDE="$PWD/node_modules/node-api-headers/include" \
             -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$PWD/native-build/output" \
-            -DPython3_EXECUTABLE="$(command -v python)" \
+            -DPython3_EXECUTABLE="$(command -v python3)" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
           cmake --build native-build --target teleprompter_tls_addon --parallel
       - name: Load the compiled N-API addon
@@ -223,6 +225,8 @@ jobs:
     name: Assemble multi-platform archive
     needs: [native-host, windows-arm64, linux-cross, darwin]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
