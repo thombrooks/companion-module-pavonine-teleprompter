@@ -4,6 +4,12 @@ project(teleprompter_tls_addon LANGUAGES C CXX)
 # Mbed TLS is linked statically into a dynamically loaded Node addon.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Ship a self-contained Windows addon rather than requiring a separately
+# installed Microsoft Visual C++ runtime on the Companion host.
+if(MSVC)
+	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # `node-api-headers` supplies stable N-API headers without coupling a prebuild
 # to a particular Node executable ABI.
 set(NODE_API_INCLUDE "" CACHE PATH "Directory containing node_api.h")

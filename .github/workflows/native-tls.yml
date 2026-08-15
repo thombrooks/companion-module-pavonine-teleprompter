@@ -38,9 +38,10 @@ jobs:
       - name: Compile portable TLS addon
         shell: bash
         run: |
-          generator=()
-          if [ "${{ matrix.platform }}" = win32 ]; then generator=(-G Ninja); fi
-          cmake "${generator[@]}" -S native -B native-build \
+          if [ "${{ matrix.platform }}" = win32 ]; then
+            MBEDTLS_PYTHON="$(command -v python)" sh scripts/prepare-mbedtls-generated.sh native-build
+          fi
+          cmake -S native -B native-build \
             -DNODE_API_INCLUDE="$PWD/node_modules/node-api-headers/include" \
             -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$PWD/native-build/output" \
             -DPython3_EXECUTABLE="$(command -v python)"
@@ -62,6 +63,48 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tls-${{ matrix.platform }}-${{ matrix.arch }}
+          path: prebuilds
+          if-no-files-found: error
+
+  windows-arm64:
+    name: win32-arm64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install JavaScript dependencies
+        run: corepack enable && yarn install --immutable
+      - name: Install Mbed TLS build dependencies
+        run: python -m pip install -r scripts/requirements-mbedtls.txt
+      - name: Prepare generated Mbed TLS sources
+        shell: bash
+        run: MBEDTLS_PYTHON="$(command -v python)" sh scripts/prepare-mbedtls-generated.sh native-build
+      - name: Cross-compile portable TLS addon
+        shell: bash
+        run: |
+          cmake -S native -B native-build -A ARM64 \
+            -DNODE_API_INCLUDE="$PWD/node_modules/node-api-headers/include" \
+            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$PWD/native-build/output" \
+            -DPython3_EXECUTABLE="$(command -v python)"
+          cmake --build native-build --target teleprompter_tls_addon --config Release --parallel
+      - name: Stage package prebuild
+        shell: bash
+        run: >-
+          node_modules/.bin/pkg-prebuilds-copy
+          --baseDir native-build/output --source teleprompter-tls-addon.node
+          --name teleprompter-tls-addon --napi_version 10
+          --platform win32 --arch arm64
+      - name: Upload package prebuild
+        uses: actions/upload-artifact@v4
+        with:
+          name: tls-win32-arm64
           path: prebuilds
           if-no-files-found: error
 
