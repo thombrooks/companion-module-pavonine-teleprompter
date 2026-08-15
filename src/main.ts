@@ -281,13 +281,18 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	}
 
 	public getConfigFields(): SomeCompanionConfigField[] {
-		const keyedTransportUnavailable = keyedTransportUnsupportedMessage()
+		const keyedTransportUnavailable = this.keyedTransportSupportMessage()
 		const deviceChoices = [{ id: '', label: 'Searching for Teleprompters…' }]
 		for (const device of [...this.devices.values()].sort((a, b) => a.name.localeCompare(b.name)))
 			deviceChoices.push({ id: device.id, label: this.deviceLabel(device) })
 		const selectedDevice = this.devices.get(this.config.deviceId)
 		const protectedDocumentUnavailable = selectedDevice
-			? protectedDocumentUnavailableMessage(this.hasDifferentKey(selectedDevice))
+			? protectedDocumentUnavailableMessage(
+					this.hasDifferentKey(selectedDevice),
+					process.platform,
+					process.arch,
+					this.nativeTlsAddonAvailable(),
+				)
 			: undefined
 		const documentPlaceholder = protectedDocumentUnavailable
 			? protectedDocumentUnavailable
@@ -429,9 +434,30 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	private networkKey(): string {
 		return this.secrets.networkKey.trim()
 	}
+	/** Do not enable keyed control simply because the source code supports a platform. */
+	private nativeTlsAddonAvailable(): boolean {
+		const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
+		const baseDirectory = existsSync(path.join(moduleDirectory, 'prebuilds')) ? moduleDirectory : path.dirname(moduleDirectory)
+		return existsSync(
+			path.join(
+				baseDirectory,
+				'prebuilds',
+				`teleprompter-tls-addon-${process.platform}-${process.arch}`,
+				'node-napi-v10.node',
+			),
+		)
+	}
+	private keyedTransportSupportMessage(): string | undefined {
+		return keyedTransportUnsupportedMessage(process.platform, process.arch, this.nativeTlsAddonAvailable())
+	}
 	private deviceLabel(device: TeleprompterDevice): string {
 		if (device.challenge === device.id) return `(No Network Key) ${device.name}`
-		const prefix = networkKeyDeviceLabelPrefix(this.hasDifferentKey(device))
+		const prefix = networkKeyDeviceLabelPrefix(
+			this.hasDifferentKey(device),
+			process.platform,
+			process.arch,
+			this.nativeTlsAddonAvailable(),
+		)
 		return prefix ? `(${prefix}) ${device.name}` : device.name
 	}
 	private hasDifferentKey(device: TeleprompterDevice): boolean {
@@ -958,7 +984,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			return
 		}
 		if (this.networkKey()) {
-			const unsupportedMessage = keyedTransportUnsupportedMessage()
+			const unsupportedMessage = this.keyedTransportSupportMessage()
 			if (unsupportedMessage) {
 				this.updateStatus(InstanceStatus.ConnectionFailure, unsupportedMessage)
 				return

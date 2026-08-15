@@ -13,14 +13,15 @@ export function keyedConnectionLog(host: string, port: number, keyPresent: boole
 	return `Connecting to ${host}:${port}; network key present: ${keyPresent ? 'yes' : 'no'}`
 }
 
-/**
- * The current TLS-PSK bridge uses Apple's Network framework and is packaged as
- * a universal macOS native addon. Unkeyed Teleprompter connections use Node's
- * TCP socket and remain portable.
- */
-export function keyedTransportUnsupportedMessage(platform = process.platform, arch = process.arch): string | undefined {
+/** A keyed connection is enabled only when this package actually contains its native prebuild. */
+export function keyedTransportUnsupportedMessage(
+	platform = process.platform,
+	arch = process.arch,
+	prebuildAvailable = platform === 'darwin' && (arch === 'arm64' || arch === 'x64'),
+): string | undefined {
+	if (prebuildAvailable) return undefined
 	if (platform !== 'darwin')
-		return 'Network-key-protected Teleprompter connections are currently supported only on macOS. Unkeyed connections remain available.'
+		return `Network-key-protected Teleprompter connections are not bundled for ${platform}/${arch}. Unkeyed connections remain available.`
 	if (arch !== 'arm64' && arch !== 'x64')
 		return `Network-key-protected Teleprompter connections require macOS on Apple Silicon or Intel (detected ${arch}).`
 	return undefined
@@ -40,9 +41,10 @@ export function networkKeyDeviceLabelPrefix(
 	differentKey: boolean,
 	platform = process.platform,
 	arch = process.arch,
+	prebuildAvailable?: boolean,
 ): string | undefined {
 	if (!differentKey) return undefined
-	return keyedTransportUnsupportedMessage(platform, arch) ? 'Network Key - Unsupported' : 'Different Network Key'
+	return keyedTransportUnsupportedMessage(platform, arch, prebuildAvailable) ? 'Network Key - Unsupported' : 'Different Network Key'
 }
 
 /** Explain why protected documents cannot be listed when the keyed bridge is unavailable. */
@@ -50,7 +52,8 @@ export function protectedDocumentUnavailableMessage(
 	differentKey: boolean,
 	platform = process.platform,
 	arch = process.arch,
+	prebuildAvailable?: boolean,
 ): string | undefined {
-	if (!differentKey || !keyedTransportUnsupportedMessage(platform, arch)) return undefined
-	return 'Network Key - Unsupported — protected documents require macOS'
+	if (!differentKey || !keyedTransportUnsupportedMessage(platform, arch, prebuildAvailable)) return undefined
+	return 'Network Key - Unsupported — protected documents require a bundled native transport'
 }
