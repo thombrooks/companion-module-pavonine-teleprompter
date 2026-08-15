@@ -28,7 +28,8 @@ clang++ -target x86_64-apple-macos11 -std=c++17 -O2 -fblocks -bundle -undefined 
 	-I"$node_api_include" \
 	-L"$build_dir/x86_64" -lteleprompter_tls_native -Wl,-rpath,@loader_path \
 	scripts/teleprompter_tls_addon.cpp -o "$build_dir/x86_64/teleprompter-tls-addon.node"
-rm -rf prebuilds
-(cd "$build_dir" && "$project_dir/node_modules/.bin/pkg-prebuilds-copy" --baseDir arm64 --source teleprompter-tls-addon.node --name teleprompter-tls-addon --napi_version 10 --arch arm64)
-(cd "$build_dir" && "$project_dir/node_modules/.bin/pkg-prebuilds-copy" --baseDir x86_64 --source teleprompter-tls-addon.node --name teleprompter-tls-addon --napi_version 10 --arch x64 --extraFiles libteleprompter_tls_native.dylib)
-mv "$build_dir/prebuilds" prebuilds
+# The release package includes prebuilds collected from CI for other hosts.
+# Refresh only the two macOS directories; never discard Windows/Linux files.
+rm -rf prebuilds/teleprompter-tls-addon-darwin-arm64 prebuilds/teleprompter-tls-addon-darwin-x64
+"$project_dir/node_modules/.bin/pkg-prebuilds-copy" --baseDir "$build_dir/arm64" --source teleprompter-tls-addon.node --name teleprompter-tls-addon --napi_version 10 --platform darwin --arch arm64
+"$project_dir/node_modules/.bin/pkg-prebuilds-copy" --baseDir "$build_dir/x86_64" --source teleprompter-tls-addon.node --name teleprompter-tls-addon --napi_version 10 --platform darwin --arch x64 --extraFiles libteleprompter_tls_native.dylib

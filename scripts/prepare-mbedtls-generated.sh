@@ -4,8 +4,12 @@
 # during configuration. Generate the exact files before adding the subproject.
 set -eu
 
-build_directory="$1"
 project_directory="$(cd "$(dirname "$0")/.." && pwd)"
+build_directory="$1"
+case "$build_directory" in
+	/*) ;;
+	*) build_directory="$project_directory/$build_directory" ;;
+esac
 mbedtls_directory="$project_directory/third_party/mbedtls"
 python_executable="${MBEDTLS_PYTHON:-python3}"
 core_directory="$build_directory/mbedtls/tf-psa-crypto/core"
