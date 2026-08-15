@@ -40,11 +40,14 @@ jobs:
         run: |
           if [ "${{ matrix.platform }}" = win32 ]; then
             MBEDTLS_PYTHON="$(command -v python)" sh scripts/prepare-mbedtls-generated.sh native-build
+            mkdir -p native-build
+            curl -fsSL "https://nodejs.org/dist/v$(node -p process.versions.node)/win-x64/node.lib" -o native-build/node.lib
           fi
           cmake -S native -B native-build \
             -DNODE_API_INCLUDE="$PWD/node_modules/node-api-headers/include" \
             -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$PWD/native-build/output" \
-            -DPython3_EXECUTABLE="$(command -v python)"
+            -DPython3_EXECUTABLE="$(command -v python)" \
+            -DNODE_LIBRARY="$PWD/native-build/node.lib"
           cmake --build native-build --target teleprompter_tls_addon --config Release --parallel
       - name: Load the compiled N-API addon
         shell: bash
@@ -85,14 +88,18 @@ jobs:
         run: python -m pip install -r scripts/requirements-mbedtls.txt
       - name: Prepare generated Mbed TLS sources
         shell: bash
-        run: MBEDTLS_PYTHON="$(command -v python)" sh scripts/prepare-mbedtls-generated.sh native-build
+        run: |
+          MBEDTLS_PYTHON="$(command -v python)" sh scripts/prepare-mbedtls-generated.sh native-build
+          mkdir -p native-build
+          curl -fsSL "https://nodejs.org/dist/v$(node -p process.versions.node)/win-arm64/node.lib" -o native-build/node.lib
       - name: Cross-compile portable TLS addon
         shell: bash
         run: |
           cmake -S native -B native-build -A ARM64 \
             -DNODE_API_INCLUDE="$PWD/node_modules/node-api-headers/include" \
             -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$PWD/native-build/output" \
-            -DPython3_EXECUTABLE="$(command -v python)"
+            -DPython3_EXECUTABLE="$(command -v python)" \
+            -DNODE_LIBRARY="$PWD/native-build/node.lib"
           cmake --build native-build --target teleprompter_tls_addon --config Release --parallel
       - name: Stage package prebuild
         shell: bash
