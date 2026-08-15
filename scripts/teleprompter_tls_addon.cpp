@@ -50,7 +50,7 @@ static void report_error(Connection* state, const char* message) {
 }
 static void native_ready(void* value) { auto* state = static_cast<Connection*>(value); if (!state->closed) napi_call_threadsafe_function(state->ready, nullptr, napi_tsfn_nonblocking); }
 static void native_data(void* value, const uint8_t* bytes, int length) { auto* state = static_cast<Connection*>(value); if (state->closed || !bytes || length <= 0) return; auto* payload = static_cast<Payload*>(malloc(sizeof(Payload))); payload->bytes = static_cast<uint8_t*>(malloc(length)); payload->length = length; memcpy(payload->bytes, bytes, length); napi_call_threadsafe_function(state->data, payload, napi_tsfn_nonblocking); }
-static void native_error(void* value, const char* message) { report_error(static_cast<Connection*>(value), message ?: "TLS failed"); }
+static void native_error(void* value, const char* message) { report_error(static_cast<Connection*>(value), message ? message : "TLS failed"); }
 static void finalizer(napi_env, void* value, void*) {
 	Connection* state = static_cast<Connection*>(value);
 	state->closed = true;
