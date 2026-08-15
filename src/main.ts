@@ -39,9 +39,18 @@ import {
 	speedLabel,
 } from './state.js'
 import { decodeFrames } from './stream.js'
-import { keyedConnectionLog, maySendTransport, stopResetPress } from './guards.js'
+import {
+	keyedConnectionLog,
+	keyedTransportUnsupportedMessage,
+	maySendTransport,
+	noKeyDeviceRequiresKeyClear,
+	networkKeyDeviceLabelPrefix,
+	protectedDocumentUnavailableMessage,
+	stopResetPress,
+} from './guards.js'
 import { isUnsetValue, maximumObservedIndex, parseTreeMessage, removedDocumentId } from './crdt.js'
 const nodeRequire = createRequire(import.meta.url)
+const nativeBindingOptions = { name: 'teleprompter-tls-addon', napi_versions: [10] }
 type NativeTlsAddon = {
 	start(
 		host: string,
@@ -52,6 +61,17 @@ type NativeTlsAddon = {
 		error: (message: string) => void,
 	): unknown
 	send(connection: unknown, data: Buffer): void
+}
+
+function loadNativeTlsAddon(moduleDirectory: string): NativeTlsAddon {
+	const baseDirectory = existsSync(path.join(moduleDirectory, 'prebuilds'))
+		? moduleDirectory
+		: path.dirname(moduleDirectory)
+	const loadPrebuild = nodeRequire('pkg-prebuilds') as (
+		base: string,
+		options: typeof nativeBindingOptions,
+	) => NativeTlsAddon
+	return loadPrebuild(baseDirectory, nativeBindingOptions)
 }
 
 interface Config {
@@ -148,7 +168,10 @@ function formatDuration(seconds: number): string {
 	return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
 }
 
-function interpolateTimerTime(points: ReadonlyArray<{ position: number; time: number }>, position: number): number | undefined {
+function interpolateTimerTime(
+	points: ReadonlyArray<{ position: number; time: number }>,
+	position: number,
+): number | undefined {
 	if (!points.length) return undefined
 	if (position <= points[0].position) return points[0].time
 	for (let index = 1; index < points.length; index++) {
@@ -163,7 +186,15 @@ function interpolateTimerTime(points: ReadonlyArray<{ position: number; time: nu
 }
 
 export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
-	private config: Config = { deviceId: '', deviceName: '', manual: false, host: '', port: 65330, documentId: '', documentName: '' }
+	private config: Config = {
+		deviceId: '',
+		deviceName: '',
+		manual: false,
+		host: '',
+		port: 65330,
+		documentId: '',
+		documentName: '',
+	}
 	private secrets: Secrets = { networkKey: '' }
 	/** Greatest full CollaborativeKit index observed on the wire this session. */
 	private maximumIndex = 0n
@@ -212,7 +243,12 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.setVariableValues({ scroll_speed: '—%' })
 		this.setVariableValues({ playback_mode: '—' })
 		this.setVariableValues({ current_segment: 'NO SEGMENTS' })
-		this.setVariableValues({ timer_elapsed: '0:00:00', timer_remaining: '—', timer_total: '—', timer_ahead_behind: '—' })
+		this.setVariableValues({
+			timer_elapsed: '0:00:00',
+			timer_remaining: '—',
+			timer_total: '—',
+			timer_ahead_behind: '—',
+		})
 		this.timerStatusTimer = setInterval(() => this.refreshTimerStatus(), 250)
 		this.updateDocumentStatus()
 		this.setPlaybackState('stopped')
@@ -245,12 +281,22 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	}
 
 	public getConfigFields(): SomeCompanionConfigField[] {
+		const keyedTransportUnavailable = this.keyedTransportSupportMessage()
 		const deviceChoices = [{ id: '', label: 'Searching for Teleprompters…' }]
 		for (const device of [...this.devices.values()].sort((a, b) => a.name.localeCompare(b.name)))
 			deviceChoices.push({ id: device.id, label: this.deviceLabel(device) })
 		const selectedDevice = this.devices.get(this.config.deviceId)
-		const documentPlaceholder =
-			selectedDevice && selectedDevice.challenge === selectedDevice.id
+		const protectedDocumentUnavailable = selectedDevice
+			? protectedDocumentUnavailableMessage(
+					this.hasDifferentKey(selectedDevice),
+					process.platform,
+					process.arch,
+					this.nativeTlsAddonAvailable(),
+				)
+			: undefined
+		const documentPlaceholder = protectedDocumentUnavailable
+			? protectedDocumentUnavailable
+			: selectedDevice && noKeyDeviceRequiresKeyClear(this.networkKey(), selectedDevice.id, selectedDevice.challenge)
 				? 'No Network Key — clear the saved key above to control this device'
 				: selectedDevice && this.hasDifferentKey(selectedDevice)
 					? 'Different Network Key — enter the matching key above'
@@ -276,6 +322,17 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				width: 12,
 				default: '',
 			},
+			...(keyedTransportUnavailable
+				? [
+						{
+							type: 'static-text' as const,
+							id: 'keyed_transport_support',
+							label: 'Network-key support',
+							width: 12,
+							value: keyedTransportUnavailable,
+						},
+					]
+				: []),
 			{
 				type: 'dropdown',
 				id: 'deviceId',
@@ -377,9 +434,31 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	private networkKey(): string {
 		return this.secrets.networkKey.trim()
 	}
+	/** Do not enable keyed control simply because the source code supports a platform. */
+	private nativeTlsAddonAvailable(): boolean {
+		const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
+		const baseDirectory = existsSync(path.join(moduleDirectory, 'prebuilds')) ? moduleDirectory : path.dirname(moduleDirectory)
+		return existsSync(
+			path.join(
+				baseDirectory,
+				'prebuilds',
+				`teleprompter-tls-addon-${process.platform}-${process.arch}`,
+				'node-napi-v10.node',
+			),
+		)
+	}
+	private keyedTransportSupportMessage(): string | undefined {
+		return keyedTransportUnsupportedMessage(process.platform, process.arch, this.nativeTlsAddonAvailable())
+	}
 	private deviceLabel(device: TeleprompterDevice): string {
 		if (device.challenge === device.id) return `(No Network Key) ${device.name}`
-		return this.hasDifferentKey(device) ? `(Different Network Key) ${device.name}` : device.name
+		const prefix = networkKeyDeviceLabelPrefix(
+			this.hasDifferentKey(device),
+			process.platform,
+			process.arch,
+			this.nativeTlsAddonAvailable(),
+		)
+		return prefix ? `(${prefix}) ${device.name}` : device.name
 	}
 	private hasDifferentKey(device: TeleprompterDevice): boolean {
 		return hasDifferentNetworkKey(this.networkKey(), device.id, device.challenge)
@@ -424,8 +503,16 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			speed_up_1: { name: 'Increase speed by 1%', options: [], callback: async () => this.adjustSpeed(1) },
 			speed_down_5: { name: 'Decrease speed by 5%', options: [], callback: async () => this.adjustSpeed(-5) },
 			speed_down_1: { name: 'Decrease speed by 1%', options: [], callback: async () => this.adjustSpeed(-1) },
-			select_manual_mode: { name: 'Select manual speed mode', options: [], callback: async () => this.setPlaybackMode('manual') },
-			select_auto_mode: { name: 'Select automatic speed mode', options: [], callback: async () => this.setPlaybackMode('timed') },
+			select_manual_mode: {
+				name: 'Select manual speed mode',
+				options: [],
+				callback: async () => this.setPlaybackMode('manual'),
+			},
+			select_auto_mode: {
+				name: 'Select automatic speed mode',
+				options: [],
+				callback: async () => this.setPlaybackMode('timed'),
+			},
 			jump_segment: {
 				name: 'Jump to segment',
 				options: [{ id: 'index', type: 'number', label: 'Segment number', default: 1, min: 1, max: 999 }],
@@ -524,7 +611,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				options: [{ id: 'index', type: 'number', label: 'Segment number', default: 1, min: 1, max: 999 }],
 				defaultStyle: { bgcolor: 0x00aa00, color: 0xffffff },
 				callback: (feedback) =>
-					segmentButtonState(this.motion, this.activeSegment()?.index === Number(feedback.options.index)) === 'active-paused',
+					segmentButtonState(this.motion, this.activeSegment()?.index === Number(feedback.options.index)) ===
+					'active-paused',
 			},
 			is_segment_active_moving: {
 				type: 'boolean',
@@ -533,7 +621,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				options: [{ id: 'index', type: 'number', label: 'Segment number', default: 1, min: 1, max: 999 }],
 				defaultStyle: { bgcolor: 0x006400, color: 0xffffff },
 				callback: (feedback) =>
-					segmentButtonState(this.motion, this.activeSegment()?.index === Number(feedback.options.index)) === 'active-moving',
+					segmentButtonState(this.motion, this.activeSegment()?.index === Number(feedback.options.index)) ===
+					'active-moving',
 			},
 			is_segment_unavailable: {
 				type: 'boolean',
@@ -542,14 +631,16 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				options: [{ id: 'index', type: 'number', label: 'Segment number', default: 1, min: 1, max: 999 }],
 				defaultStyle: { bgcolor: 0x505050, color: 0xaaaaaa },
 				callback: (feedback) =>
-					segmentButtonState(this.motion, this.activeSegment()?.index === Number(feedback.options.index)) === 'inactive-moving',
+					segmentButtonState(this.motion, this.activeSegment()?.index === Number(feedback.options.index)) ===
+					'inactive-moving',
 			},
 			// One style feedback makes the precedence explicit: exactly one of the
 			// four states is rendered for a numbered segment button.
 			segment_button_style: {
 				type: 'advanced',
 				name: 'Numbered segment button state',
-				description: 'Current segment is bright green when paused and dark green while moving; other segments are black or gray.',
+				description:
+					'Current segment is bright green when paused and dark green while moving; other segments are black or gray.',
 				options: [{ id: 'index', type: 'number', label: 'Segment number', default: 1, min: 1, max: 999 }],
 				callback: (feedback) => {
 					const state = segmentButtonState(this.motion, this.activeSegment()?.index === Number(feedback.options.index))
@@ -631,7 +722,15 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			{
 				id: 'speed',
 				name: 'Speed',
-				definitions: ['speed_auto', 'speed_manual', 'speed_indicator', 'speed_up_5', 'speed_up_1', 'speed_down_5', 'speed_down_1'],
+				definitions: [
+					'speed_auto',
+					'speed_manual',
+					'speed_indicator',
+					'speed_up_5',
+					'speed_up_1',
+					'speed_down_5',
+					'speed_down_1',
+				],
 			},
 			{
 				id: 'segments',
@@ -699,9 +798,17 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			timer_remaining: this.timerPreset('Remaining', 'timer_remaining'),
 			timer_total: this.timerPreset('Total', 'timer_total'),
 			timer_ahead_behind: {
-				type: 'simple', name: 'Ahead / Behind (indicator)', keywords: ['timer', 'ahead', 'behind', 'indicator'],
-				style: { text: 'Ahead\n$(pavonine-teleprompter:timer_ahead_behind)', size: '14', color: 0xffffff, bgcolor: 0x000000 },
-				steps: [{ down: [], up: [] }], feedbacks: [{ feedbackId: 'timer_ahead_behind', options: {} }],
+				type: 'simple',
+				name: 'Ahead / Behind (indicator)',
+				keywords: ['timer', 'ahead', 'behind', 'indicator'],
+				style: {
+					text: 'Ahead\n$(pavonine-teleprompter:timer_ahead_behind)',
+					size: '14',
+					color: 0xffffff,
+					bgcolor: 0x000000,
+				},
+				steps: [{ down: [], up: [] }],
+				feedbacks: [{ feedbackId: 'timer_ahead_behind', options: {} }],
 			},
 			reverse: {
 				type: 'simple',
@@ -728,10 +835,22 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				keywords: ['speed', 'indicator', 'feedback'],
 				style: { text: 'Speed\n$(pavonine-teleprompter:scroll_speed)', size: '18', color: 0xffffff, bgcolor: 0x202020 },
 				steps: [{ down: [], up: [] }],
-				feedbacks: [{ feedbackId: 'is_manual_speed_unavailable', options: {}, style: { bgcolor: 0x505050, color: 0xaaaaaa } }],
+				feedbacks: [
+					{ feedbackId: 'is_manual_speed_unavailable', options: {}, style: { bgcolor: 0x505050, color: 0xaaaaaa } },
+				],
 			},
-			speed_auto: this.playbackModePreset('Automatic speed mode', 'Speed\nAUTO', 'select_auto_mode', 'is_auto_playback_mode'),
-			speed_manual: this.playbackModePreset('Manual speed mode', 'Speed\nMANUAL', 'select_manual_mode', 'is_manual_playback_mode'),
+			speed_auto: this.playbackModePreset(
+				'Automatic speed mode',
+				'Speed\nAUTO',
+				'select_auto_mode',
+				'is_auto_playback_mode',
+			),
+			speed_manual: this.playbackModePreset(
+				'Manual speed mode',
+				'Speed\nMANUAL',
+				'select_manual_mode',
+				'is_manual_playback_mode',
+			),
 			speed_up_5: this.speedPreset('Increase speed by 5%', '⌃⌃', 'speed_up_5'),
 			speed_up_1: this.speedPreset('Increase speed by 1%', '⌃', 'speed_up_1'),
 			speed_down_5: this.speedPreset('Decrease speed by 5%', '⌄⌄', 'speed_down_5'),
@@ -788,14 +907,28 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			keywords: ['speed', 'transport'],
 			style: { text, size: '24' as const, color: 0xffffff, bgcolor: 0x202020 },
 			steps: [{ down: [{ actionId, options: {} }], up: [] }],
-			feedbacks: [{ feedbackId: 'is_manual_speed_unavailable' as const, options: {}, style: { bgcolor: 0x505050, color: 0xaaaaaa } }],
+			feedbacks: [
+				{
+					feedbackId: 'is_manual_speed_unavailable' as const,
+					options: {},
+					style: { bgcolor: 0x505050, color: 0xaaaaaa },
+				},
+			],
 		}
 	}
 	private timerPreset(name: string, variable: 'timer_elapsed' | 'timer_remaining' | 'timer_total') {
 		return {
-			type: 'simple' as const, name: `${name} (indicator)`, keywords: ['timer', name.toLowerCase(), 'indicator'],
-			style: { text: `${name}\n$(pavonine-teleprompter:${variable})`, size: '14' as const, color: 0xffffff, bgcolor: 0x000000 },
-			steps: [{ down: [], up: [] }], feedbacks: [],
+			type: 'simple' as const,
+			name: `${name} (indicator)`,
+			keywords: ['timer', name.toLowerCase(), 'indicator'],
+			style: {
+				text: `${name}\n$(pavonine-teleprompter:${variable})`,
+				size: '14' as const,
+				color: 0xffffff,
+				bgcolor: 0x000000,
+			},
+			steps: [{ down: [], up: [] }],
+			feedbacks: [],
 		}
 	}
 	private playbackModePreset(
@@ -851,6 +984,11 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			return
 		}
 		if (this.networkKey()) {
+			const unsupportedMessage = this.keyedTransportSupportMessage()
+			if (unsupportedMessage) {
+				this.updateStatus(InstanceStatus.ConnectionFailure, unsupportedMessage)
+				return
+			}
 			const device = this.devices.get(this.config.deviceId)
 			if (!device) {
 				this.updateStatus(
@@ -891,11 +1029,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.log('info', keyedConnectionLog(endpoint.host, endpoint.port, true))
 		const psk = networkKeyMaterial(this.networkKey(), device.id)
 		const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
-		const addonPath = existsSync(path.join(moduleDirectory, 'teleprompter-tls-addon.node'))
-			? path.join(moduleDirectory, 'teleprompter-tls-addon.node')
-			: path.join(moduleDirectory, 'companion', 'teleprompter-tls-addon.node')
 		try {
-			const addon = nodeRequire(addonPath) as NativeTlsAddon
+			const addon = loadNativeTlsAddon(moduleDirectory)
 			this.bridge = addon.start(
 				endpoint.host,
 				String(endpoint.port),
@@ -1364,7 +1499,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	private selectedPlaybackMode(): 'manual' | 'timed' | undefined {
 		return this.documentSelectors.get(this.config.documentId)
 	}
-	private currentTimerValues(): { elapsed: number; remaining?: number; total?: number; aheadBehind?: number } | undefined {
+	private currentTimerValues():
+		{ elapsed: number; remaining?: number; total?: number; aheadBehind?: number } | undefined {
 		const documentId = this.config.documentId
 		if (!documentId || !this.hasSelectedDocumentTimingSnapshot()) return undefined
 		const timerStart = this.documentTimerStarts.get(documentId)
@@ -1377,10 +1513,16 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		const scheduled = interpolateTimerTime(points, position)
 		if (this.selectedPlaybackMode() === 'timed' && points.length && scheduled !== undefined) {
 			const total = points.at(-1)?.time
-			return { elapsed, total, remaining: total === undefined ? undefined : Math.max(0, total - scheduled), aheadBehind: scheduled - elapsed }
+			return {
+				elapsed,
+				total,
+				remaining: total === undefined ? undefined : Math.max(0, total - scheduled),
+				aheadBehind: scheduled - elapsed,
+			}
 		}
 		const speed = this.documentSpeeds.get(documentId)
-		if (speed === undefined || speed <= 0) return { elapsed, aheadBehind: scheduled === undefined ? undefined : scheduled - elapsed }
+		if (speed === undefined || speed <= 0)
+			return { elapsed, aheadBehind: scheduled === undefined ? undefined : scheduled - elapsed }
 		return {
 			elapsed,
 			total: maximum / speed,
@@ -1394,7 +1536,10 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			timer_elapsed: formatDuration(values?.elapsed ?? 0),
 			timer_remaining: values?.remaining === undefined ? '—' : formatDuration(values.remaining),
 			timer_total: values?.total === undefined ? '—' : formatDuration(values.total),
-			timer_ahead_behind: values?.aheadBehind === undefined ? '—' : `${values.aheadBehind < 0 ? '-' : ''}${formatDuration(Math.abs(values.aheadBehind))}`,
+			timer_ahead_behind:
+				values?.aheadBehind === undefined
+					? '—'
+					: `${values.aheadBehind < 0 ? '-' : ''}${formatDuration(Math.abs(values.aheadBehind))}`,
 		})
 		this.checkFeedbacks('timer_ahead_behind')
 	}
@@ -1423,7 +1568,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				continue
 			const previous = positions.get(point.markerUUID)
 			if (previous === undefined || point.position < previous) positions.set(point.markerUUID, point.position)
-			if (typeof point.time === 'number' && Number.isFinite(point.time)) timerPoints.push({ position: point.position, time: point.time })
+			if (typeof point.time === 'number' && Number.isFinite(point.time))
+				timerPoints.push({ position: point.position, time: point.time })
 		}
 		timerPoints.sort((a, b) => a.position - b.position || a.time - b.time)
 		if (timerPoints.length) this.documentTimingFunctions.set(documentId, timerPoints)
@@ -1753,7 +1899,9 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			throw new Error('Teleprompter is using timed playback; manual speed is inactive')
 		const next = clampManualSpeed(requested, this.documentMaximumSpeeds.get(documentId))
 		const timing = this.currentTiming(documentId)
-		await this.send(speedMutation(documentId, next, { ...timing, keyTime: 0, receivedAt: Date.now() }, this.nextSequence()))
+		await this.send(
+			speedMutation(documentId, next, { ...timing, keyTime: 0, receivedAt: Date.now() }, this.nextSequence()),
+		)
 		this.documentTiming.set(documentId, { ...timing, keyTime: 0, receivedAt: Date.now() })
 		this.setDocumentSpeed(documentId, next)
 	}
@@ -1773,9 +1921,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	private async send(data: Buffer): Promise<void> {
 		if (this.bridge) {
 			const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
-			const addon = nodeRequire(
-				path.join(moduleDirectory, 'companion', 'teleprompter-tls-addon.node'),
-			) as NativeTlsAddon
+			const addon = loadNativeTlsAddon(moduleDirectory)
 			addon.send(this.bridge, data)
 			return
 		}

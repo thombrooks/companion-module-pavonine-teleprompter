@@ -11,7 +11,20 @@ Neither is a substitute for the other. Teleprompter's protocol is unpublished an
 
 Companion's [development-environment guidance](https://companion.free/for-developers/setting-up-developer-environment/) recommends Node 22, and this module is declared as a `node22` runtime. The repository pins the currently bundled Companion Node 22 patch release in [`.node-version`](../.node-version); its scripts refuse to run under another major version.
 
-The macOS native TLS helper is compiled under that same Node 22 runtime. It uses the pinned `node-api-headers` package rather than a machine-specific Node installation, because Companion distributes a runtime executable but not C/C++ development headers. The addon uses stable N-API only; it does not use Node/V8 ABI-specific APIs.
+The native TLS addon is compiled under that same Node 22 runtime. It uses the pinned `node-api-headers` package rather than a machine-specific Node installation, because Companion distributes a runtime executable but not C/C++ development headers. The addon uses stable N-API only; it does not use Node/V8 ABI-specific APIs.
+
+The experimental cross-platform TLS implementation vendors Mbed TLS as the pinned `third_party/mbedtls` submodule. Initialise it before building, and give Mbed TLS a Python environment containing its code-generation dependency:
+
+```sh
+git submodule update --init --recursive
+python3 -m venv .venv-mbedtls
+.venv-mbedtls/bin/python -m pip install -r scripts/requirements-mbedtls.txt
+MBEDTLS_PYTHON="$PWD/.venv-mbedtls/bin/python" yarn build
+```
+
+The existing macOS Network.framework helper is deliberately retained for the macOS x64 prebuild while the Mbed TLS transport is validated. Apple Silicon builds statically link Mbed TLS, so they do not carry a helper dylib.
+
+`native/CMakeLists.txt` is the portable build entry point. The CI workflow compiles and loads that addon on macOS, Linux, and Windows on every change; it does not yet publish Linux/Windows prebuilds. Publishing is deliberately gated on a keyed Teleprompter interoperability rehearsal for each target rather than merely a successful C++ compile.
 
 Install and select Node 22 with the workflow Companion recommends, then enable the pinned Yarn release:
 
@@ -48,7 +61,8 @@ The tests intentionally do not assert randomized message UUID values or random a
 Use a sacrificial copy of a script, not an active production script. Keep both the Mac/iPad Teleprompter host and Companion on the intended production network.
 
 - [ ] With no network key, the device appears once despite multiple local NICs and the document picker shows the open document.
-- [ ] With a matching network key, the device and its open document appear after authentication.
+- [ ] On macOS, with a matching network key, the device and its open document appear after authentication.
+- [ ] On a non-macOS Companion host, an unkeyed device remains controllable and entering a network key shows the explicit macOS-only keyed-transport message rather than a native-addon load error.
 - [ ] With an intentionally wrong key, the device remains visible as **Different Network Key** and no document is offered.
 - [ ] Set the playhead in the middle of the script, then test Forward → Pause → Forward. It resumes smoothly at the same place.
 - [ ] From a mid-script position, test Reverse → Pause → Reverse. It resumes smoothly and does not jump toward either end.
@@ -66,7 +80,7 @@ Use a sacrificial copy of a script, not an active production script. Keep both t
 
 Record the Teleprompter and Companion versions, target architecture, and whether the device used a network key with the release notes. Do not commit packet captures or real network keys.
 
-For every release, confirm both bundled native files are universal macOS binaries with `lipo -archs companion/teleprompter-tls-addon.node` and `lipo -archs companion/libteleprompter_tls_native.dylib`; each must report `arm64 x86_64`.
+For a native release, confirm each expected `prebuilds/teleprompter-tls-addon-<platform>-<arch>/node-napi-v10.node` file is present. The macOS x64 package also includes its retained Network.framework helper dylib; the Mbed TLS package links its TLS implementation statically.
 
 ## When a test reveals a regression
 
