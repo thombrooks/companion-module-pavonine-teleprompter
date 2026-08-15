@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 project(teleprompter_tls_addon LANGUAGES C CXX)
 
+# Mbed TLS is linked statically into a dynamically loaded Node addon.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 # `node-api-headers` supplies stable N-API headers without coupling a prebuild
 # to a particular Node executable ABI.
 set(NODE_API_INCLUDE "" CACHE PATH "Directory containing node_api.h")

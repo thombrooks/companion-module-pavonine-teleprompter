@@ -13,10 +13,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            platform: darwin
-            arch: x64
-            publish: false
           - os: ubuntu-latest
             platform: linux
             arch: x64
@@ -41,12 +37,14 @@ jobs:
         run: python -m pip install -r scripts/requirements-mbedtls.txt
       - name: Compile portable TLS addon
         shell: bash
-        run: >-
-          cmake -S native -B native-build
-          -DNODE_API_INCLUDE="$PWD/node_modules/node-api-headers/include"
-          -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$PWD/native-build/output"
-          -DPython3_EXECUTABLE="$(command -v python)"
-          && cmake --build native-build --target teleprompter_tls_addon --config Release --parallel
+        run: |
+          generator=()
+          if [ "${{ matrix.platform }}" = win32 ]; then generator=(-G Ninja); fi
+          cmake "${generator[@]}" -S native -B native-build \
+            -DNODE_API_INCLUDE="$PWD/node_modules/node-api-headers/include" \
+            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$PWD/native-build/output" \
+            -DPython3_EXECUTABLE="$(command -v python)"
+          cmake --build native-build --target teleprompter_tls_addon --config Release --parallel
       - name: Load the compiled N-API addon
         shell: bash
         run: >-
