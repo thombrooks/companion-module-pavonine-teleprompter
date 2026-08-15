@@ -15,7 +15,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@companion-module/tools@npm:^3.0.1":
+"@companion-module/tools@npm:3.0.2":
   version: 3.0.2
   resolution: "@companion-module/tools@npm:3.0.2"
   dependencies:
@@ -51,6 +51,45 @@ __metadata:
     companion-surface-build: ./dist/scripts/build-surface.js
     companion-surface-check: ./dist/scripts/check-surface.js
   checksum: 10c0/9e0e8755f812990cfea3e742bb351ac643cb85e7e916960c0d33e555cec9a474abf053be1e67530021d4f16c64c499c3c3fbf4d31aeac9bd6676cf6acf8a5d8a
+  languageName: node
+  linkType: hard
+
+"@companion-module/tools@patch:@companion-module/tools@npm%3A3.0.2#~/.yarn/patches/@companion-module-tools-npm-3.0.2-ea5420fbc3.patch":
+  version: 3.0.2
+  resolution: "@companion-module/tools@patch:@companion-module/tools@npm%3A3.0.2#~/.yarn/patches/@companion-module-tools-npm-3.0.2-ea5420fbc3.patch::version=3.0.2&hash=b7db29"
+  dependencies:
+    "@eslint/js": "npm:^10.0.1"
+    esbuild: "npm:^0.28.1"
+    eslint-config-prettier: "npm:^10.1.8"
+    eslint-plugin-n: "npm:^18.1.0"
+    eslint-plugin-prettier: "npm:^5.5.6"
+    find-up: "npm:^8.0.0"
+    semver: "npm:^7.8.4"
+    tar: "npm:^7.5.16"
+    zx: "npm:^8.8.5"
+  peerDependencies:
+    "@companion-module/base": ^2.0.0
+    "@companion-surface/base": ^1.0.0
+    eslint: ^9.39.3 || ^10.2.0
+    prettier: ^3.8.1
+    typescript-eslint: ^8.56.1
+  peerDependenciesMeta:
+    "@companion-module/base":
+      optional: true
+    "@companion-surface/base":
+      optional: true
+    eslint:
+      optional: true
+    prettier:
+      optional: true
+    typescript-eslint:
+      optional: true
+  bin:
+    companion-module-build: ./dist/scripts/build-connection.js
+    companion-module-check: ./dist/scripts/check-connection.js
+    companion-surface-build: ./dist/scripts/build-surface.js
+    companion-surface-check: ./dist/scripts/check-surface.js
+  checksum: 10c0/0af6b711b681a9419475caf538287c07c0b9d5f0b99676662562fc47ade96b9d0adc6b4ca39f9764fe60b9cbed5b865d6415f9b75a45f22eff7baeb2d66d57fc
   languageName: node
   linkType: hard
 
@@ -327,7 +366,7 @@ __metadata:
   resolution: "companion-module-pavonine-teleprompter@workspace:."
   dependencies:
     "@companion-module/base": "npm:~2.0.4"
-    "@companion-module/tools": "npm:^3.0.1"
+    "@companion-module/tools": "patch:@companion-module/tools@npm%3A3.0.2#~/.yarn/patches/@companion-module-tools-npm-3.0.2-ea5420fbc3.patch"
     "@types/node": "npm:^22.19.17"
     bonjour-service: "npm:^1.4.4"
     node-api-headers: "npm:1.9.0"

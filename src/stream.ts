@@ -9,8 +9,13 @@ export function decodeFrames(buffer: Buffer): FrameDecodeResult {
 	const frames: Buffer[] = []
 	let offset = 0
 	while (buffer.length - offset >= 8) {
-		const length = buffer.readBigUInt64LE(offset)
-		if (length > BigInt(Number.MAX_SAFE_INTEGER)) return { frames, remainder: Buffer.alloc(0), impossibleLength: true }
+		const length = buffer.readBigInt64LE(offset)
+		// Teleprompter treats zero as a keepalive and silently discards invalid
+		// signed/oversized headers before reading the next header.
+		if (length <= 0n || length >= 2n ** 32n) {
+			offset += 8
+			continue
+		}
 		const end = offset + 8 + Number(length)
 		if (end > buffer.length) break
 		frames.push(buffer.subarray(offset + 8, end))

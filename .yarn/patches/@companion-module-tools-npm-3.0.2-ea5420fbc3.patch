@@ -1,0 +1,23 @@
+diff --git a/dist/scripts/lib/build-util.js b/dist/scripts/lib/build-util.js
+index 8ad215e82f3f1d72e7393ebf21f987cf8764b3b1..77a3003f1f46caa1e8748e769678e3f2f80f0d7d 100644
+--- a/dist/scripts/lib/build-util.js
++++ b/dist/scripts/lib/build-util.js
+@@ -4,6 +4,7 @@ import { fs } from 'zx';
+ import { findUp } from 'find-up';
+ import * as tar from 'tar';
+ import { createRequire } from 'module';
++import { fileURLToPath } from 'url';
+ import * as semver from 'semver';
+ import * as esbuild from 'esbuild';
+ function toSanitizedDirname(name) {
+@@ -14,6 +15,10 @@ export async function readUTF8File(filePath) {
+     return fs.readFile(filePath, { encoding: 'utf8' });
+ }
+ export async function findModuleDir(cwd) {
++    // `import.meta.resolve()` returns a file URL in Node 22. Convert it before
++    // handing it to zx/fs, which expects an ordinary filesystem path.
++    if (cwd.startsWith('file:'))
++        cwd = fileURLToPath(cwd);
+     const stat = await fs.stat(cwd);
+     if (stat.isFile())
+         cwd = path.dirname(cwd);

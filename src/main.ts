@@ -9,8 +9,8 @@ import {
 	type CompanionVariableDefinitions,
 } from '@companion-module/base'
 import Bonjour, { type Browser, type Service } from 'bonjour-service'
-import { pbkdf2Sync } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -19,6 +19,7 @@ import { networkInterfaces } from 'node:os'
 import {
 	resetMutation,
 	segmentJumpMutation,
+	selectorMutation,
 	speedMutation,
 	transportMutation,
 	type Motion,
@@ -28,16 +29,18 @@ import {
 	automaticallySelectedDocument,
 	clampManualSpeed,
 	documentStatus,
-	estimateTiming,
+	evaluateTiming,
 	hasDifferentNetworkKey,
 	hasFreshDocumentTimingSnapshot,
+	networkKeyMaterial,
 	preferredHosts,
 	selectedDocumentAfterDeviceChange,
+	segmentButtonState,
 	speedLabel,
 } from './state.js'
 import { decodeFrames } from './stream.js'
-import { keyedConnectionLog, maySendTransport } from './guards.js'
-import { isUnsetValue, removedDocumentId } from './crdt.js'
+import { keyedConnectionLog, maySendTransport, stopResetPress } from './guards.js'
+import { isUnsetValue, maximumObservedIndex, parseTreeMessage, removedDocumentId } from './crdt.js'
 const nodeRequire = createRequire(import.meta.url)
 type NativeTlsAddon = {
 	start(
@@ -54,6 +57,8 @@ type NativeTlsAddon = {
 interface Config {
 	[key: string]: string | number | boolean | null
 	deviceId: string
+	/** Friendly identity persisted across per-launch Bonjour instance UUID changes. */
+	deviceName: string
 	manual: boolean
 	host: string
 	port: number
@@ -74,6 +79,8 @@ type ActionSchema = {
 	speed_up_1: { options: Record<string, never> }
 	speed_down_5: { options: Record<string, never> }
 	speed_down_1: { options: Record<string, never> }
+	select_manual_mode: { options: Record<string, never> }
+	select_auto_mode: { options: Record<string, never> }
 	toggle_play_pause: { options: Record<string, never> }
 	jump_segment: { options: { index: number } }
 	previous_segment: { options: Record<string, never> }
@@ -83,10 +90,29 @@ type FeedbackSchema = {
 	is_playing: { type: 'boolean'; options: Record<string, never> }
 	is_reverse_playing: { type: 'boolean'; options: Record<string, never> }
 	is_document_ready: { type: 'boolean'; options: Record<string, never> }
+	is_manual_playback_mode: { type: 'boolean'; options: Record<string, never> }
+	is_auto_playback_mode: { type: 'boolean'; options: Record<string, never> }
+	is_manual_speed_unavailable: { type: 'boolean'; options: Record<string, never> }
+	timer_ahead_behind: { type: 'advanced'; options: Record<string, never> }
+	stop_reset_confirmation: { type: 'advanced'; options: Record<string, never> }
 	is_segment_active: { type: 'boolean'; options: { index: number } }
+	is_segment_active_moving: { type: 'boolean'; options: { index: number } }
+	is_segment_unavailable: { type: 'boolean'; options: { index: number } }
+	segment_button_style: { type: 'advanced'; options: { index: number } }
 	segment_display: { type: 'advanced'; options: { index: number } }
+	segment_navigation_display: { type: 'advanced'; options: { direction: 'previous' | 'next' } }
 }
-type VariableSchema = { playback_state: string; scroll_speed: string; document_status: string; current_segment: string }
+type VariableSchema = {
+	playback_state: string
+	scroll_speed: string
+	playback_mode: string
+	document_status: string
+	current_segment: string
+	timer_elapsed: string
+	timer_remaining: string
+	timer_total: string
+	timer_ahead_behind: string
+}
 type ModuleSchema = {
 	config: Config
 	secrets: Secrets
@@ -114,13 +140,33 @@ interface Segment {
 	pauseDuration: number
 }
 
+function formatDuration(seconds: number): string {
+	const whole = Math.max(0, Math.floor(seconds))
+	const hours = Math.floor(whole / 3600)
+	const minutes = Math.floor((whole % 3600) / 60)
+	const remainingSeconds = whole % 60
+	return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
+}
+
+function interpolateTimerTime(points: ReadonlyArray<{ position: number; time: number }>, position: number): number | undefined {
+	if (!points.length) return undefined
+	if (position <= points[0].position) return points[0].time
+	for (let index = 1; index < points.length; index++) {
+		const right = points[index]
+		const left = points[index - 1]
+		if (position <= right.position) {
+			const distance = right.position - left.position
+			return distance > 0 ? left.time + ((position - left.position) / distance) * (right.time - left.time) : right.time
+		}
+	}
+	return points.at(-1)?.time
+}
+
 export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
-	private config: Config = { deviceId: '', manual: false, host: '', port: 65330, documentId: '', documentName: '' }
+	private config: Config = { deviceId: '', deviceName: '', manual: false, host: '', port: 65330, documentId: '', documentName: '' }
 	private secrets: Secrets = { networkKey: '' }
-	// Teleprompter compares this app-wide CRDT revision before the actor clock.
-	// A reinstall loses module-local state, so use a millisecond epoch clock: it
-	// is safe as an IEEE-754 integer and newer than prior controller sessions.
-	private sequence = BigInt(Date.now())
+	/** Greatest full CollaborativeKit index observed on the wire this session. */
+	private maximumIndex = 0n
 	private socket: net.Socket | undefined
 	private bridge: unknown
 	private keyedDataReceived = false
@@ -128,6 +174,10 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	private reconnectTimer: NodeJS.Timeout | undefined
 	private noDocumentTimer: NodeJS.Timeout | undefined
 	private documentRefreshTimer: NodeJS.Timeout | undefined
+	private stopResetConfirmationTimer: NodeJS.Timeout | undefined
+	private stopResetFlashTimer: NodeJS.Timeout | undefined
+	private stopResetConfirmationPending = false
+	private stopResetFlashOn = false
 	private discoveryRefreshTimer: NodeJS.Timeout | undefined
 	private destroyed = false
 	private bonjour: Bonjour | undefined
@@ -141,37 +191,44 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	/** Timestamp of the most recent complete timing snapshot for each document. */
 	private readonly documentTimingSnapshots = new Map<string, number>()
 	private readonly documentSpeeds = new Map<string, number>()
+	private readonly documentMaximumSpeeds = new Map<string, number>()
+	private readonly documentSelectors = new Map<string, 'manual' | 'timed'>()
+	private readonly documentTimerStarts = new Map<string, { elapsed: number; receivedAt: number }>()
+	private readonly documentTimingFunctions = new Map<string, Array<{ position: number; time: number }>>()
 	private readonly documentSegments = new Map<string, Segment[]>()
-	private readonly timerNeedsStart = new Set<string>()
-	private playbackStartedAt: number | undefined
 	private segmentStatusTimer: NodeJS.Timeout | undefined
+	private timerStatusTimer: NodeJS.Timeout | undefined
 	private lastSegmentStatus: string | undefined
 	private motion: Motion = 'stopped'
 	private connectionActive = false
 
 	public async init(config: Config, _isFirstInit: boolean, secrets: Secrets): Promise<void> {
-		this.config = { ...config, documentName: config.documentName ?? '' }
+		this.config = { ...config, deviceName: config.deviceName ?? '', documentName: config.documentName ?? '' }
 		this.secrets = { networkKey: secrets?.networkKey ?? '' }
 		this.setActionDefinitions(this.getActions())
 		this.setFeedbackDefinitions(this.getFeedbacks())
 		this.setVariableDefinitions(this.getVariables())
 		this.setPresetDefinitions(this.getPresetStructure(), this.getPresets())
 		this.setVariableValues({ scroll_speed: '—%' })
+		this.setVariableValues({ playback_mode: '—' })
 		this.setVariableValues({ current_segment: 'NO SEGMENTS' })
+		this.setVariableValues({ timer_elapsed: '0:00:00', timer_remaining: '—', timer_total: '—', timer_ahead_behind: '—' })
+		this.timerStatusTimer = setInterval(() => this.refreshTimerStatus(), 250)
 		this.updateDocumentStatus()
 		this.setPlaybackState('stopped')
 		this.startDiscovery()
 		this.connect()
 	}
 	public async configUpdated(config: Config, secrets: Secrets): Promise<void> {
-		const deviceChanged = config.deviceId !== this.config.deviceId || config.manual !== this.config.manual
+		const nextDeviceName = this.devices.get(config.deviceId)?.name ?? config.deviceName ?? ''
+		const deviceChanged = nextDeviceName !== this.config.deviceName || config.manual !== this.config.manual
 		const keyChanged = secrets?.networkKey !== this.secrets.networkKey
 		const documentId = selectedDocumentAfterDeviceChange(this.config.deviceId, config.deviceId, config.documentId)
 		const documentName = deviceChanged
 			? ''
 			: config.documentName ||
 				(documentId === this.config.documentId ? this.config.documentName : (this.documents.get(documentId) ?? ''))
-		this.config = { ...config, documentId, documentName }
+		this.config = { ...config, deviceName: nextDeviceName, documentId, documentName }
 		this.secrets = { networkKey: secrets?.networkKey ?? '' }
 		if (deviceChanged || keyChanged) this.keyedHostIndex = 0
 		// Keep the monotonic session clock across connection/configuration changes.
@@ -265,6 +322,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			this.browser = this.bonjour.find({ type: 'teleprompter3', protocol: 'tcp' }, (service) => this.addDevice(service))
 			this.browser.on('txt-update', (service) => this.addDevice(service))
 			this.browser.on('srv-update', (service) => this.addDevice(service))
+			this.browser.on('down', (service) => this.removeDevice(service))
 			this.discoveryRefreshTimer = setInterval(() => this.browser?.update(), 5000)
 		} catch (error) {
 			this.updateStatus(InstanceStatus.UnknownWarning, `Bonjour discovery unavailable: ${(error as Error).message}`)
@@ -294,11 +352,27 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		const challenge = this.txtString(txt?.challenge)
 		this.devices.set(id, { id, name, host, hosts, port: service.port, challenge })
 		if (!this.config.manual && !this.config.deviceId && this.devices.size === 1) {
-			this.config = { ...this.config, deviceId: id }
+			this.config = { ...this.config, deviceId: id, deviceName: name }
 			this.saveConfig(this.config)
 			this.log('info', `Automatically selected the only available Teleprompter: ${name}`)
 			this.connect()
 		} else if (!this.config.manual && this.config.deviceId === id && !this.socket) this.connect()
+		else if (!this.config.manual && !this.devices.has(this.config.deviceId) && this.config.deviceName === name) {
+			const matches = [...this.devices.values()].filter((candidate) => candidate.name === name)
+			if (matches.length === 1) {
+				this.config = { ...this.config, deviceId: id }
+				this.log('info', `Restored Teleprompter selection after its service restarted: ${name}`)
+				this.connect()
+			}
+		}
+	}
+	private removeDevice(service: Service): void {
+		if (!this.devices.delete(service.name)) return
+		this.log('info', `Teleprompter service went away: ${service.name}`)
+		if (!this.config.manual && this.config.deviceId === service.name) {
+			this.disconnect()
+			this.updateStatus(InstanceStatus.Connecting, 'Waiting for Teleprompter to return')
+		}
 	}
 	private networkKey(): string {
 		return this.secrets.networkKey.trim()
@@ -339,18 +413,19 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			stop_reset: {
 				name: 'Stop and reset',
 				options: [],
-				callback: async () => this.runReset(),
+				callback: async () => this.requestStopReset(),
 			},
 			set_speed: {
 				name: 'Set manual speed',
 				options: [{ id: 'speed', type: 'number', label: 'Speed', default: 100, min: 0, max: 1000 }],
-				callback: async (event) =>
-					this.send(speedMutation(this.documentId(), Number(event.options.speed), this.nextSequence())),
+				callback: async (event) => this.setManualSpeed(Number(event.options.speed)),
 			},
 			speed_up_5: { name: 'Increase speed by 5%', options: [], callback: async () => this.adjustSpeed(5) },
 			speed_up_1: { name: 'Increase speed by 1%', options: [], callback: async () => this.adjustSpeed(1) },
 			speed_down_5: { name: 'Decrease speed by 5%', options: [], callback: async () => this.adjustSpeed(-5) },
 			speed_down_1: { name: 'Decrease speed by 1%', options: [], callback: async () => this.adjustSpeed(-1) },
+			select_manual_mode: { name: 'Select manual speed mode', options: [], callback: async () => this.setPlaybackMode('manual') },
+			select_auto_mode: { name: 'Select automatic speed mode', options: [], callback: async () => this.setPlaybackMode('timed') },
 			jump_segment: {
 				name: 'Jump to segment',
 				options: [{ id: 'index', type: 'number', label: 'Segment number', default: 1, min: 1, max: 999 }],
@@ -389,13 +464,106 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					this.documents.has(this.config.documentId) &&
 					this.hasSelectedDocumentTimingSnapshot(),
 			},
+			is_manual_playback_mode: {
+				type: 'boolean',
+				name: 'Manual speed mode selected',
+				description: 'True when the selected document uses manually controlled speed.',
+				options: [],
+				defaultStyle: { bgcolor: 0x00aa00, color: 0xffffff },
+				callback: () => this.selectedPlaybackMode() === 'manual',
+			},
+			is_auto_playback_mode: {
+				type: 'boolean',
+				name: 'Automatic speed mode selected',
+				description: 'True when the selected document uses marker-timed automatic playback.',
+				options: [],
+				defaultStyle: { bgcolor: 0x00aa00, color: 0xffffff },
+				callback: () => this.selectedPlaybackMode() === 'timed',
+			},
+			is_manual_speed_unavailable: {
+				type: 'boolean',
+				name: 'Manual speed controls unavailable',
+				description: 'True in automatic mode, where Teleprompter ignores manual speed.',
+				options: [],
+				defaultStyle: { bgcolor: 0x505050, color: 0xaaaaaa },
+				callback: () => this.selectedPlaybackMode() === 'timed',
+			},
+			timer_ahead_behind: {
+				type: 'advanced',
+				name: 'Ahead / Behind timer state',
+				description: 'Shows live schedule variance: green ahead of schedule, red behind schedule.',
+				options: [],
+				callback: () => {
+					const values = this.currentTimerValues()
+					if (!values?.aheadBehind) return { text: 'Ahead\n—', size: '14', color: 0xffffff, bgcolor: 0x000000 }
+					const ahead = values.aheadBehind >= 0
+					return {
+						text: `${ahead ? 'Ahead' : 'Behind'}\n${formatDuration(Math.abs(values.aheadBehind))}`,
+						size: '14',
+						color: 0xffffff,
+						bgcolor: ahead ? 0x00aa00 : 0x8b0000,
+					}
+				},
+			},
+			stop_reset_confirmation: {
+				type: 'advanced',
+				name: 'Stop & Reset confirmation state',
+				description: 'Flashes and asks for confirmation for three seconds after the first Stop & Reset press.',
+				options: [],
+				callback: () => ({
+					text: this.stopResetConfirmationPending ? '◀ ■\nSURE?' : '◀ ■',
+					size: this.stopResetConfirmationPending ? '18' : '24',
+					color: 0xffffff,
+					bgcolor: this.stopResetConfirmationPending && this.stopResetFlashOn ? 0x8b0000 : 0x000000,
+				}),
+			},
 			is_segment_active: {
 				type: 'boolean',
-				name: 'Segment is active',
-				description: 'True when the selected document playhead is within this segment.',
+				name: 'Segment is active while paused',
+				description: 'True when the selected document playhead is within this segment and is paused.',
 				options: [{ id: 'index', type: 'number', label: 'Segment number', default: 1, min: 1, max: 999 }],
 				defaultStyle: { bgcolor: 0x00aa00, color: 0xffffff },
-				callback: (feedback) => this.activeSegment()?.index === Number(feedback.options.index),
+				callback: (feedback) =>
+					segmentButtonState(this.motion, this.activeSegment()?.index === Number(feedback.options.index)) === 'active-paused',
+			},
+			is_segment_active_moving: {
+				type: 'boolean',
+				name: 'Segment is active while moving',
+				description: 'True when the selected document playhead is within this segment and is moving.',
+				options: [{ id: 'index', type: 'number', label: 'Segment number', default: 1, min: 1, max: 999 }],
+				defaultStyle: { bgcolor: 0x006400, color: 0xffffff },
+				callback: (feedback) =>
+					segmentButtonState(this.motion, this.activeSegment()?.index === Number(feedback.options.index)) === 'active-moving',
+			},
+			is_segment_unavailable: {
+				type: 'boolean',
+				name: 'Inactive segment while moving',
+				description: 'True when this segment is not current and Teleprompter is moving.',
+				options: [{ id: 'index', type: 'number', label: 'Segment number', default: 1, min: 1, max: 999 }],
+				defaultStyle: { bgcolor: 0x505050, color: 0xaaaaaa },
+				callback: (feedback) =>
+					segmentButtonState(this.motion, this.activeSegment()?.index === Number(feedback.options.index)) === 'inactive-moving',
+			},
+			// One style feedback makes the precedence explicit: exactly one of the
+			// four states is rendered for a numbered segment button.
+			segment_button_style: {
+				type: 'advanced',
+				name: 'Numbered segment button state',
+				description: 'Current segment is bright green when paused and dark green while moving; other segments are black or gray.',
+				options: [{ id: 'index', type: 'number', label: 'Segment number', default: 1, min: 1, max: 999 }],
+				callback: (feedback) => {
+					const state = segmentButtonState(this.motion, this.activeSegment()?.index === Number(feedback.options.index))
+					switch (state) {
+						case 'active-paused':
+							return { bgcolor: 0x00aa00, color: 0xffffff }
+						case 'active-moving':
+							return { bgcolor: 0x006400, color: 0xffffff }
+						case 'inactive-moving':
+							return { bgcolor: 0x505050, color: 0xaaaaaa }
+						case 'inactive-paused':
+							return { bgcolor: 0x000000, color: 0xffffff }
+					}
+				},
 			},
 			segment_display: {
 				type: 'advanced',
@@ -408,8 +576,33 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					return {
 						text: segment ? `${segment.index}\n${segment.name}` : `SEGMENT\n${index}`,
 						size: '14',
-						color: 0xffffff,
-						bgcolor: this.activeSegment()?.index === index ? 0x00aa00 : 0x202020,
+					}
+				},
+			},
+			segment_navigation_display: {
+				type: 'advanced',
+				name: 'Segment navigation availability',
+				description: 'Grays out next/previous segment controls while Teleprompter is moving.',
+				options: [
+					{
+						id: 'direction',
+						type: 'dropdown',
+						label: 'Direction',
+						default: 'next',
+						choices: [
+							{ id: 'previous', label: 'Previous segment' },
+							{ id: 'next', label: 'Next segment' },
+						],
+					},
+				],
+				callback: (feedback) => {
+					const previous = feedback.options.direction === 'previous'
+					const moving = this.motion !== 'stopped'
+					return {
+						text: previous ? '◀ ☰' : '☰ ▶',
+						size: '24',
+						color: moving ? 0xaaaaaa : 0xffffff,
+						bgcolor: moving ? 0x505050 : 0x202020,
 					}
 				},
 			},
@@ -419,8 +612,13 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		return {
 			playback_state: { name: 'Playback state (Playing, Paused, or Reverse)' },
 			scroll_speed: { name: 'Current scroll speed' },
+			playback_mode: { name: 'Playback mode (Manual or Timed)' },
 			document_status: { name: 'Selected document connection status' },
 			current_segment: { name: 'Current segment number and name' },
+			timer_elapsed: { name: 'Live show elapsed time' },
+			timer_remaining: { name: 'Estimated script time remaining' },
+			timer_total: { name: 'Estimated total script time' },
+			timer_ahead_behind: { name: 'Live schedule variance (positive ahead, negative behind)' },
 		}
 	}
 	private getPresetStructure(): CompanionPresetSection<ModuleSchema>[] {
@@ -433,12 +631,17 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			{
 				id: 'speed',
 				name: 'Speed',
-				definitions: ['speed_indicator', 'speed_up_5', 'speed_up_1', 'speed_down_5', 'speed_down_1'],
+				definitions: ['speed_auto', 'speed_manual', 'speed_indicator', 'speed_up_5', 'speed_up_1', 'speed_down_5', 'speed_down_1'],
 			},
 			{
 				id: 'segments',
 				name: 'Segments',
 				definitions: ['current_segment_status', 'jump_segment', 'previous_segment', 'next_segment'],
+			},
+			{
+				id: 'timers',
+				name: 'Timers',
+				definitions: ['timer_elapsed', 'timer_remaining', 'timer_total', 'timer_ahead_behind'],
 			},
 		]
 	}
@@ -471,10 +674,10 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					text: '◀ ■',
 					size: '24',
 					color: 0xffffff,
-					bgcolor: 0x8b0000,
+					bgcolor: 0x000000,
 				},
 				steps: [{ down: [{ actionId: 'stop_reset', options: {} }], up: [] }],
-				feedbacks: [],
+				feedbacks: [{ feedbackId: 'stop_reset_confirmation', options: {} }],
 			},
 			document_status: {
 				type: 'simple',
@@ -491,6 +694,14 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				style: { text: '$(pavonine-teleprompter:current_segment)', size: '14', color: 0xffffff, bgcolor: 0x202020 },
 				steps: [{ down: [], up: [] }],
 				feedbacks: [],
+			},
+			timer_elapsed: this.timerPreset('Elapsed', 'timer_elapsed'),
+			timer_remaining: this.timerPreset('Remaining', 'timer_remaining'),
+			timer_total: this.timerPreset('Total', 'timer_total'),
+			timer_ahead_behind: {
+				type: 'simple', name: 'Ahead / Behind (indicator)', keywords: ['timer', 'ahead', 'behind', 'indicator'],
+				style: { text: 'Ahead\n$(pavonine-teleprompter:timer_ahead_behind)', size: '14', color: 0xffffff, bgcolor: 0x000000 },
+				steps: [{ down: [], up: [] }], feedbacks: [{ feedbackId: 'timer_ahead_behind', options: {} }],
 			},
 			reverse: {
 				type: 'simple',
@@ -515,10 +726,12 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				type: 'simple',
 				name: 'Current speed (indicator)',
 				keywords: ['speed', 'indicator', 'feedback'],
-				style: { text: '$(pavonine-teleprompter:scroll_speed)', size: '24', color: 0xffffff, bgcolor: 0x202020 },
+				style: { text: 'Speed\n$(pavonine-teleprompter:scroll_speed)', size: '18', color: 0xffffff, bgcolor: 0x202020 },
 				steps: [{ down: [], up: [] }],
-				feedbacks: [],
+				feedbacks: [{ feedbackId: 'is_manual_speed_unavailable', options: {}, style: { bgcolor: 0x505050, color: 0xaaaaaa } }],
 			},
+			speed_auto: this.playbackModePreset('Automatic speed mode', 'Speed\nAUTO', 'select_auto_mode', 'is_auto_playback_mode'),
+			speed_manual: this.playbackModePreset('Manual speed mode', 'Speed\nMANUAL', 'select_manual_mode', 'is_manual_playback_mode'),
 			speed_up_5: this.speedPreset('Increase speed by 5%', '⌃⌃', 'speed_up_5'),
 			speed_up_1: this.speedPreset('Increase speed by 1%', '⌃', 'speed_up_1'),
 			speed_down_5: this.speedPreset('Decrease speed by 5%', '⌄⌄', 'speed_down_5'),
@@ -527,7 +740,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				type: 'simple',
 				name: 'Jump to segment 1',
 				keywords: ['segment', 'jump', '1'],
-				style: { text: 'SEGMENT\n1', size: '14', color: 0xffffff, bgcolor: 0x202020 },
+				style: { text: 'SEGMENT\n1', size: '14', color: 0xffffff, bgcolor: 0x000000 },
 				// Companion actions and feedbacks have separate option objects, but a
 				// button-local variable gives this template one shared edit point.
 				localVariables: [
@@ -554,10 +767,14 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 						feedbackId: 'segment_display',
 						options: { index: { value: '$(local:segment_index)', isExpression: true } },
 					},
+					{
+						feedbackId: 'segment_button_style',
+						options: { index: { value: '$(local:segment_index)', isExpression: true } },
+					},
 				],
 			},
-			previous_segment: this.segmentNavigationPreset('Previous segment', '◀ ☰', 'previous_segment'),
-			next_segment: this.segmentNavigationPreset('Next segment', '☰ ▶', 'next_segment'),
+			previous_segment: this.segmentNavigationPreset('Previous segment', '◀ ☰', 'previous_segment', 'previous'),
+			next_segment: this.segmentNavigationPreset('Next segment', '☰ ▶', 'next_segment', 'next'),
 		}
 	}
 	private speedPreset(
@@ -571,17 +788,44 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			keywords: ['speed', 'transport'],
 			style: { text, size: '24' as const, color: 0xffffff, bgcolor: 0x202020 },
 			steps: [{ down: [{ actionId, options: {} }], up: [] }],
-			feedbacks: [],
+			feedbacks: [{ feedbackId: 'is_manual_speed_unavailable' as const, options: {}, style: { bgcolor: 0x505050, color: 0xaaaaaa } }],
 		}
 	}
-	private segmentNavigationPreset(name: string, text: string, actionId: 'previous_segment' | 'next_segment') {
+	private timerPreset(name: string, variable: 'timer_elapsed' | 'timer_remaining' | 'timer_total') {
+		return {
+			type: 'simple' as const, name: `${name} (indicator)`, keywords: ['timer', name.toLowerCase(), 'indicator'],
+			style: { text: `${name}\n$(pavonine-teleprompter:${variable})`, size: '14' as const, color: 0xffffff, bgcolor: 0x000000 },
+			steps: [{ down: [], up: [] }], feedbacks: [],
+		}
+	}
+	private playbackModePreset(
+		name: string,
+		text: string,
+		actionId: 'select_manual_mode' | 'select_auto_mode',
+		feedbackId: 'is_manual_playback_mode' | 'is_auto_playback_mode',
+	) {
+		return {
+			type: 'simple' as const,
+			name,
+			keywords: ['speed', 'mode', actionId === 'select_auto_mode' ? 'automatic' : 'manual'],
+			style: { text, size: '14' as const, color: 0xffffff, bgcolor: 0x000000 },
+			steps: [{ down: [{ actionId, options: {} }], up: [] }],
+			feedbacks: [{ feedbackId, options: {}, style: { bgcolor: 0x00aa00, color: 0xffffff } }],
+		}
+	}
+	private segmentNavigationPreset(
+		name: string,
+		text: string,
+		actionId: 'previous_segment' | 'next_segment',
+		direction: 'previous' | 'next',
+	) {
 		return {
 			type: 'simple' as const,
 			name,
 			keywords: ['segment', 'navigation', actionId === 'previous_segment' ? 'previous' : 'next'],
 			style: { text, size: '24' as const, color: 0xffffff, bgcolor: 0x202020 },
 			steps: [{ down: [{ actionId, options: {} }], up: [] }],
-			feedbacks: [],
+			feedbacks: [{ feedbackId: 'segment_navigation_display' as const, options: { direction } }],
 		}
 	}
 	private endpoint(): Endpoint | undefined {
@@ -645,7 +889,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		const hostIndex = this.keyedHostIndex % device.hosts.length
 		const endpoint: Endpoint = { host: device.hosts[hostIndex] ?? device.host, port: device.port }
 		this.log('info', keyedConnectionLog(endpoint.host, endpoint.port, true))
-		const psk = pbkdf2Sync(this.networkKey(), device.id, 4096, 32, 'sha256').toString('hex')
+		const psk = networkKeyMaterial(this.networkKey(), device.id)
 		const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
 		const addonPath = existsSync(path.join(moduleDirectory, 'teleprompter-tls-addon.node'))
 			? path.join(moduleDirectory, 'teleprompter-tls-addon.node')
@@ -655,7 +899,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			this.bridge = addon.start(
 				endpoint.host,
 				String(endpoint.port),
-				Buffer.from(psk, 'hex'),
+				psk,
 				() => {
 					this.log('info', 'Keyed Teleprompter transport authenticated')
 					this.connected()
@@ -696,10 +940,12 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		if (this.noDocumentTimer) clearTimeout(this.noDocumentTimer)
 		if (this.documentRefreshTimer) clearTimeout(this.documentRefreshTimer)
 		if (this.segmentStatusTimer) clearInterval(this.segmentStatusTimer)
+		if (this.timerStatusTimer) clearInterval(this.timerStatusTimer)
 		this.reconnectTimer = undefined
 		this.noDocumentTimer = undefined
 		this.documentRefreshTimer = undefined
 		this.segmentStatusTimer = undefined
+		this.timerStatusTimer = undefined
 		this.socket?.destroy()
 		this.socket = undefined
 		this.bridge = undefined
@@ -748,15 +994,18 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			socket.on('data', (data) => {
 				buffer = Buffer.concat([buffer, data])
 				while (buffer.length >= 8) {
-					const length = buffer.readBigUInt64LE()
-					if (length > BigInt(Number.MAX_SAFE_INTEGER)) return finish()
+					const length = buffer.readBigInt64LE()
+					if (length <= 0n || length >= 2n ** 32n) {
+						buffer = buffer.subarray(8)
+						continue
+					}
 					const end = 8 + Number(length)
 					if (buffer.length < end) return
 					const payload = buffer.subarray(8, end)
 					buffer = buffer.subarray(end)
 					if (payload.length === 0) continue
 					try {
-						const message = JSON.parse(payload.toString('utf8'))
+						const message = parseTreeMessage(payload.toString('utf8'))
 						this.observeSequence(message)
 						const documents = this.snapshotDocuments(message)
 						if (documents.size > 0) {
@@ -775,16 +1024,11 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	}
 	private receive(data: Buffer): void {
 		const decoded = decodeFrames(Buffer.concat([this.receiveBuffer, data]))
-		if (decoded.impossibleLength) {
-			this.log('warn', 'Ignoring an impossibly large Teleprompter frame')
-			this.disconnect()
-			return
-		}
 		this.receiveBuffer = Buffer.from(decoded.remainder)
 		for (const payload of decoded.frames) {
 			if (payload.length === 0) continue
 			try {
-				const message = JSON.parse(payload.toString('utf8'))
+				const message = parseTreeMessage(payload.toString('utf8'))
 				this.observeSequence(message)
 				this.readDocuments(message)
 			} catch {
@@ -793,15 +1037,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		}
 	}
 	private observeSequence(message: unknown): void {
-		const visit = (node: unknown): void => {
-			if (!Array.isArray(node)) return
-			if (node[0] === '+' && typeof node[1] === 'number' && Number.isSafeInteger(node[1])) {
-				const observed = BigInt(node[1])
-				if (observed >= this.sequence) this.sequence = observed + 1n
-			}
-			for (const child of node) visit(child)
-		}
-		visit(message)
+		const observed = maximumObservedIndex(message)
+		if (observed !== undefined && observed > this.maximumIndex) this.maximumIndex = observed
 	}
 	private readDocuments(message: unknown): void {
 		const visit = (node: unknown): void => {
@@ -822,19 +1059,37 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					const type = value[4] === 'keyTime' ? 'Delta' : 'CGFloat'
 					const number = this.findTypedNumber(node[index + 1], type)
 					if (number !== undefined) {
-						const current = this.documentTiming.get(value[1]) ?? { keyPosition: 0, keyTime: 0 }
+						const current = this.documentTiming.get(value[1]) ?? { keyPosition: 0, keyTime: 0, receivedAt: Date.now() }
 						this.documentTiming.set(value[1], {
 							...current,
-							...(value[4] === 'keyTime' ? { keyTime: number } : { keyPosition: number }),
+							...(value[4] === 'keyTime'
+								? { keyTime: number }
+								: value[4] === 'scrolledPosition'
+									? { scrolledPosition: number }
+									: { keyPosition: number }),
+							receivedAt: Date.now(),
 						})
 						this.updateSegmentStatus()
 					}
+				}
+				if (this.isTimerStartPath(value)) {
+					const elapsed = this.findTypedNumber(node[index + 1], 'Delta')
+					if (elapsed === undefined) this.documentTimerStarts.delete(value[1])
+					else this.documentTimerStarts.set(value[1], { elapsed, receivedAt: Date.now() })
+					this.refreshTimerStatus()
 				}
 				if (this.isManualSpeedPath(value)) {
 					const speed = this.findTypedNumber(node[index + 1], 'Double')
 					if (speed !== undefined) this.setDocumentSpeed(value[1], speed)
 				}
-				if (this.isTimerStartPath(value) && isUnsetValue(node[index + 1])) this.timerNeedsStart.add(value[1])
+				if (this.isMaximumSpeedPath(value)) {
+					const maximum = this.findTypedNumber(node[index + 1], 'Double')
+					if (maximum !== undefined) this.documentMaximumSpeeds.set(value[1], maximum)
+				}
+				if (this.isSelectorPath(value)) {
+					const selector = this.findTypedValue(node[index + 1], 'Timing.Selector')
+					if (selector === 'manual' || selector === 'timed') this.setDocumentSelector(value[1], selector)
+				}
 				if (this.isDocumentNamePath(value)) {
 					const name = this.findStringValue(node[index + 1])
 					if (name && this.documents.get(value[1]) !== name) {
@@ -882,25 +1137,34 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 						const name = document ? this.findTypedValue(document.name, 'String') : undefined
 						const model = document ? this.findCrdtObject(document.model) : undefined
 						const timing = model ? this.findCrdtObject(model.timing) : undefined
-						const timerInfo = model ? this.findCrdtObject(model.timerInfo) : undefined
+						const timerInfo = document ? this.findCrdtObject(model?.timerInfo) : undefined
+						const timerStart = this.findTypedNumber(timerInfo?.timerStart, 'Delta')
+						if (timerStart === undefined) this.documentTimerStarts.delete(documentId)
+						else this.documentTimerStarts.set(documentId, { elapsed: timerStart, receivedAt: Date.now() })
 						const speed = this.findTypedNumber(timing?.manualSpeed, 'Double')
+						const maximumSpeed = this.findTypedNumber(model?.maximumSpeed, 'Double')
+						const maximumPosition = this.findTypedNumber(model?.maximumPosition, 'CGFloat')
 						const keyPosition = this.findTypedNumber(timing?.keyPosition, 'CGFloat')
 						const scrolledPosition = this.findTypedNumber(timing?.scrolledPosition, 'CGFloat')
 						const keyTime = this.findTypedNumber(timing?.keyTime, 'Delta')
 						if (keyPosition !== undefined || scrolledPosition !== undefined || keyTime !== undefined) {
+							const previous = this.documentTiming.get(documentId)
 							this.documentTiming.set(documentId, {
-								// Stop & Reset intentionally leaves keyPosition at the old
-								// anchor but moves scrolledPosition to zero. TP Controller
-								// uses that visible position when starting again.
-								keyPosition: scrolledPosition ?? keyPosition ?? this.documentTiming.get(documentId)?.keyPosition ?? 0,
-								keyTime: keyTime ?? this.documentTiming.get(documentId)?.keyTime ?? 0,
+								keyPosition: keyPosition ?? previous?.keyPosition ?? 0,
+								keyTime: keyTime ?? previous?.keyTime ?? 0,
+								scrolledPosition: scrolledPosition ?? previous?.scrolledPosition,
+								maximumPosition: maximumPosition ?? previous?.maximumPosition,
+								receivedAt: Date.now(),
 							})
 							this.documentTimingSnapshots.set(documentId, Date.now())
 							this.updateSegmentStatus()
 						}
-						if (isUnsetValue(timerInfo?.timerStart)) this.timerNeedsStart.add(documentId)
 						if (speed !== undefined) this.setDocumentSpeed(documentId, speed)
+						if (maximumSpeed !== undefined) this.documentMaximumSpeeds.set(documentId, maximumSpeed)
+						const selector = this.findTypedValue(timing?.selector, 'Timing.Selector')
+						if (selector === 'manual' || selector === 'timed') this.setDocumentSelector(documentId, selector)
 						if (model) this.readSegments(documentId, model)
+						this.refreshTimerStatus()
 						const motion = this.findTimingMotion(timing?.motion) ?? 'stopped'
 						this.documentMotions.set(documentId, motion)
 						if (documentId === this.config.documentId) this.setPlaybackState(motion, true)
@@ -931,8 +1195,9 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.documentTiming.delete(documentId)
 		this.documentTimingSnapshots.delete(documentId)
 		this.documentSpeeds.delete(documentId)
+		this.documentTimerStarts.delete(documentId)
+		this.documentTimingFunctions.delete(documentId)
 		this.documentSegments.delete(documentId)
-		this.timerNeedsStart.delete(documentId)
 		if (this.config.documentId === documentId) {
 			this.setPlaybackState('stopped', true)
 			this.setVariableValues({ scroll_speed: '' })
@@ -1007,6 +1272,27 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			value[4] === 'manualSpeed'
 		)
 	}
+	private isMaximumSpeedPath(value: unknown): value is [string, string, string, string] {
+		return (
+			Array.isArray(value) &&
+			value.length === 4 &&
+			value[0] === 'documents' &&
+			typeof value[1] === 'string' &&
+			value[2] === 'model' &&
+			value[3] === 'maximumSpeed'
+		)
+	}
+	private isSelectorPath(value: unknown): value is [string, string, string, string, string] {
+		return (
+			Array.isArray(value) &&
+			value.length === 5 &&
+			value[0] === 'documents' &&
+			typeof value[1] === 'string' &&
+			value[2] === 'model' &&
+			value[3] === 'timing' &&
+			value[4] === 'selector'
+		)
+	}
 	private findStringValue(value: unknown): string | undefined {
 		if (!Array.isArray(value)) return undefined
 		if (value[0] === 'String' && typeof value[1] === 'string') return value[1]
@@ -1043,29 +1329,89 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		}
 		return undefined
 	}
-	private setPlaybackState(motion: Motion, authoritative = false, resetPlaybackClock = false): void {
-		// Remote mutations already include their authoritative position. Estimating
-		// again here double-counts the elapsed movement and causes visible jumps.
-		if (!authoritative && !resetPlaybackClock && this.motion !== 'stopped' && motion !== this.motion)
-			this.commitEstimatedPosition()
-		if (motion !== 'stopped' && (motion !== this.motion || resetPlaybackClock)) this.playbackStartedAt = Date.now()
-		if (motion === 'stopped') this.playbackStartedAt = undefined
+	private setPlaybackState(motion: Motion, _authoritative = false): void {
 		this.motion = motion
 		this.setVariableValues({
 			playback_state: motion === 'forward' ? 'Playing' : motion === 'reverse' ? 'Reverse' : 'Paused',
 		})
-		this.checkFeedbacks('is_playing', 'is_reverse_playing')
+		// Segment identity may remain unchanged when motion changes, but numbered
+		// segment controls still need to switch between their active/gray styles.
+		this.checkFeedbacks(
+			'is_playing',
+			'is_reverse_playing',
+			'is_segment_active',
+			'is_segment_active_moving',
+			'is_segment_unavailable',
+			'segment_button_style',
+			'segment_display',
+			'segment_navigation_display',
+		)
 		this.updateSegmentStatus()
 		this.updateSegmentStatusTracking()
 	}
 	private setDocumentSpeed(documentId: string, speed: number): void {
 		this.documentSpeeds.set(documentId, speed)
-		if (documentId === this.config.documentId) this.setVariableValues({ scroll_speed: speedLabel(speed) })
+		if (documentId === this.config.documentId)
+			this.setVariableValues({ scroll_speed: speedLabel(speed, this.documentMaximumSpeeds.get(documentId)) })
+	}
+	private setDocumentSelector(documentId: string, selector: 'manual' | 'timed'): void {
+		this.documentSelectors.set(documentId, selector)
+		if (documentId === this.config.documentId) {
+			this.setVariableValues({ playback_mode: selector === 'timed' ? 'TIMED' : 'MANUAL' })
+			this.checkFeedbacks('is_manual_playback_mode', 'is_auto_playback_mode', 'is_manual_speed_unavailable')
+		}
+	}
+	private selectedPlaybackMode(): 'manual' | 'timed' | undefined {
+		return this.documentSelectors.get(this.config.documentId)
+	}
+	private currentTimerValues(): { elapsed: number; remaining?: number; total?: number; aheadBehind?: number } | undefined {
+		const documentId = this.config.documentId
+		if (!documentId || !this.hasSelectedDocumentTimingSnapshot()) return undefined
+		const timerStart = this.documentTimerStarts.get(documentId)
+		const elapsed = timerStart ? timerStart.elapsed + (Date.now() - timerStart.receivedAt) / 1000 : 0
+		const timing = this.currentTiming(documentId)
+		const maximum = timing.maximumPosition
+		if (maximum === undefined) return { elapsed }
+		const position = timing.keyPosition
+		const points = this.documentTimingFunctions.get(documentId) ?? []
+		const scheduled = interpolateTimerTime(points, position)
+		if (this.selectedPlaybackMode() === 'timed' && points.length && scheduled !== undefined) {
+			const total = points.at(-1)?.time
+			return { elapsed, total, remaining: total === undefined ? undefined : Math.max(0, total - scheduled), aheadBehind: scheduled - elapsed }
+		}
+		const speed = this.documentSpeeds.get(documentId)
+		if (speed === undefined || speed <= 0) return { elapsed, aheadBehind: scheduled === undefined ? undefined : scheduled - elapsed }
+		return {
+			elapsed,
+			total: maximum / speed,
+			remaining: Math.max(0, maximum - position) / speed,
+			aheadBehind: scheduled === undefined ? undefined : scheduled - elapsed,
+		}
+	}
+	private refreshTimerStatus(): void {
+		const values = this.currentTimerValues()
+		this.setVariableValues({
+			timer_elapsed: formatDuration(values?.elapsed ?? 0),
+			timer_remaining: values?.remaining === undefined ? '—' : formatDuration(values.remaining),
+			timer_total: values?.total === undefined ? '—' : formatDuration(values.total),
+			timer_ahead_behind: values?.aheadBehind === undefined ? '—' : `${values.aheadBehind < 0 ? '-' : ''}${formatDuration(Math.abs(values.aheadBehind))}`,
+		})
+		this.checkFeedbacks('timer_ahead_behind')
 	}
 	private readSegments(documentId: string, model: Record<string, unknown>): void {
-		const timingFunction = this.findTypedRecord(model, 'MarkersTimingFunction')
+		const timing = this.findCrdtObject(model.timing)
+		const timingFunction = this.findTypedRecord(timing?.markersTimingFunction, 'MarkersTimingFunction')
+		const functionMaximumPosition =
+			typeof timingFunction?.maximumPosition === 'number' && Number.isFinite(timingFunction.maximumPosition)
+				? timingFunction.maximumPosition
+				: undefined
+		if (functionMaximumPosition !== undefined) {
+			const previous = this.documentTiming.get(documentId) ?? { keyPosition: 0, keyTime: 0 }
+			this.documentTiming.set(documentId, { ...previous, maximumPosition: functionMaximumPosition })
+		}
 		const keyPoints = Array.isArray(timingFunction?.keyPoints) ? timingFunction.keyPoints : []
 		const positions = new Map<string, number>()
+		const timerPoints: Array<{ position: number; time: number }> = []
 		for (const keyPoint of keyPoints) {
 			if (!keyPoint || typeof keyPoint !== 'object') continue
 			const point = keyPoint as Record<string, unknown>
@@ -1077,7 +1423,11 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				continue
 			const previous = positions.get(point.markerUUID)
 			if (previous === undefined || point.position < previous) positions.set(point.markerUUID, point.position)
+			if (typeof point.time === 'number' && Number.isFinite(point.time)) timerPoints.push({ position: point.position, time: point.time })
 		}
+		timerPoints.sort((a, b) => a.position - b.position || a.time - b.time)
+		if (timerPoints.length) this.documentTimingFunctions.set(documentId, timerPoints)
+		else this.documentTimingFunctions.delete(documentId)
 		const markers = new Map<string, { name: string; pauseEnabled: boolean; pauseDuration: number }>()
 		const visit = (value: unknown): void => {
 			if (Array.isArray(value)) {
@@ -1110,6 +1460,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.documentSegments.set(documentId, segments)
 		this.refreshSegmentDefinitions()
 		this.updateSegmentStatus()
+		this.refreshTimerStatus()
 	}
 	private findTypedRecord(value: unknown, type: string): Record<string, unknown> | undefined {
 		if (Array.isArray(value)) {
@@ -1139,6 +1490,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	private updateSegmentStatus(): void {
 		if (this.config.documentId && !this.hasSelectedDocumentTimingSnapshot()) {
 			this.setSegmentStatus('SYNCING\nDOCUMENT')
+			this.refreshSegmentFeedbacks()
 			return
 		}
 		const segments = this.currentSegments()
@@ -1149,12 +1501,23 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				? 'BEFORE\nSEGMENT 1'
 				: 'NO SEGMENTS'
 		this.setSegmentStatus(currentSegment)
+		// Run at every timer tick while moving.  The position can cross a marker
+		// even when the displayed status text is unchanged for other reasons.
+		this.refreshSegmentFeedbacks()
 	}
 	private setSegmentStatus(value: string): void {
 		if (value === this.lastSegmentStatus) return
 		this.lastSegmentStatus = value
 		this.setVariableValues({ current_segment: value })
-		this.checkFeedbacks('is_segment_active', 'segment_display')
+	}
+	private refreshSegmentFeedbacks(): void {
+		this.checkFeedbacks(
+			'is_segment_active',
+			'is_segment_active_moving',
+			'is_segment_unavailable',
+			'segment_button_style',
+			'segment_display',
+		)
 	}
 	private updateSegmentStatusTracking(): void {
 		if (this.segmentStatusTimer) clearInterval(this.segmentStatusTimer)
@@ -1169,10 +1532,13 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.setPresetDefinitions(this.getPresetStructure(), this.getPresets())
 	}
 	private async jumpToSegment(index: number, synchronize = true): Promise<void> {
+		this.cancelStopResetConfirmation()
 		try {
 			if (synchronize && !(await this.refreshDocuments()))
 				throw new Error('Unable to synchronize the current document; command not sent')
 			const documentId = this.documentId()
+			if ((this.documentMotions.get(documentId) ?? 'stopped') !== 'stopped')
+				throw new Error('Pause the Teleprompter before jumping to a segment; command not sent')
 			const segment = this.documentSegments.get(documentId)?.find((candidate) => candidate.index === index)
 			if (!segment) throw new Error(`Segment ${index} is not available for the selected document`)
 			const current = this.documentTiming.get(documentId)?.keyPosition ?? 0
@@ -1182,7 +1548,13 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				`Segment ${index} jump requested; writing ${data.length} bytes from ${current} to ${segment.position}`,
 			)
 			await this.send(data)
-			this.documentTiming.set(documentId, { keyPosition: segment.position, keyTime: 0.002 })
+			this.documentTiming.set(documentId, {
+				...this.documentTiming.get(documentId),
+				keyPosition: segment.position,
+				keyTime: 0,
+				scrolledPosition: segment.position,
+				receivedAt: Date.now(),
+			})
 			this.updateSegmentStatus()
 			this.log('info', `Segment ${index} jump sent`)
 		} catch (error) {
@@ -1192,6 +1564,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		}
 	}
 	private async jumpAdjacentSegment(direction: -1 | 1): Promise<void> {
+		this.cancelStopResetConfirmation()
 		if (!(await this.refreshDocuments()))
 			throw new Error('Unable to synchronize the current document; command not sent')
 		const segments = this.currentSegments()
@@ -1210,6 +1583,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.setPlaybackState(this.documentMotions.get(documentId) ?? 'stopped', true)
 		const speed = this.documentSpeeds.get(documentId)
 		if (speed !== undefined) this.setDocumentSpeed(documentId, speed)
+		const selector = this.documentSelectors.get(documentId)
+		if (selector) this.setDocumentSelector(documentId, selector)
 		this.log('info', `Automatically selected the only available document: ${this.documents.get(documentId)}`)
 		this.updateDocumentStatus()
 	}
@@ -1255,32 +1630,33 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		return this.config.documentId.toUpperCase()
 	}
 	private nextSequence(): bigint {
-		const now = BigInt(Date.now())
-		if (now > this.sequence) this.sequence = now
-		return this.sequence++
+		let increment = randomBytes(8).readBigUInt64LE()
+		if (increment === 0n) increment = 1n
+		const next = this.maximumIndex + increment
+		this.maximumIndex = next
+		return next
 	}
 	private transport(motion: Motion): { data: Buffer; documentId: string; timing: TimingState } {
 		const documentId = this.documentId()
 		// A fresh snapshot is authoritative when starting from a pause. While
 		// already moving its position remains the starting anchor, so TP Controller
 		// advances a local playhead before either Pause or a direction switch.
-		const switchingDirection = this.motion !== 'stopped' && motion !== this.motion
-		const position =
-			motion === 'stopped' || switchingDirection
-				? this.currentTiming(documentId)
-				: (this.documentTiming.get(documentId) ?? { keyPosition: 0, keyTime: 0 })
-		// `keyTime` is a transaction timestamp, not persistent document state.
-		// A fresh snapshot can contain an old multi-second/hour Delta; reusing it
-		// makes Teleprompter fast-forward to catch up. TP Controller emits a new,
-		// very small Delta for every command.
-		const timing = { ...position, keyTime: 0.002 }
+		const position = this.currentTiming(documentId)
+		const timing = { ...position, keyTime: 0, receivedAt: Date.now() }
 		return {
-			data: transportMutation(documentId, motion, timing, this.nextSequence(), this.timerNeedsStart.has(documentId)),
+			data: transportMutation(
+				documentId,
+				motion,
+				timing,
+				this.nextSequence(),
+				motion === 'forward' && !this.documentTimerStarts.has(documentId),
+			),
 			documentId,
 			timing,
 		}
 	}
 	private async runTransport(motion: Motion): Promise<void> {
+		this.cancelStopResetConfirmation()
 		try {
 			if (!maySendTransport(await this.refreshDocuments(), this.config.documentId))
 				throw new Error('Unable to synchronize the Teleprompter position; command not sent')
@@ -1291,17 +1667,47 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			// new estimate origin as-is: re-estimating during a direction switch
 			// would apply the just-elapsed movement a second time.
 			this.documentTiming.set(documentId, timing)
+			this.documentMotions.set(documentId, motion)
+			// Teleprompter creates timerStart on the first forward play after reset.
+			// Mirror that origin immediately; a remote echo may arrive much later.
+			if (motion === 'forward' && !this.documentTimerStarts.has(documentId))
+				this.documentTimerStarts.set(documentId, { elapsed: 0, receivedAt: Date.now() })
 			this.updateSegmentStatus()
-			if (motion === 'forward') this.timerNeedsStart.delete(documentId)
+			this.refreshTimerStatus()
 			// A playing Teleprompter normally sends no intermediate state updates;
 			// keep the toggle authoritative until it next reports a state change.
-			this.setPlaybackState(motion, false, true)
+			this.setPlaybackState(motion)
 			this.log('info', `Transport action sent: ${motion}`)
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error)
 			this.log('error', `Transport action failed: ${message}`)
 			throw error
 		}
+	}
+	private async requestStopReset(): Promise<void> {
+		if (stopResetPress(this.stopResetConfirmationPending) === 'confirm') {
+			this.stopResetConfirmationPending = true
+			this.stopResetFlashOn = true
+			this.stopResetConfirmationTimer = setTimeout(() => this.cancelStopResetConfirmation(), 3000)
+			this.stopResetFlashTimer = setInterval(() => {
+				this.stopResetFlashOn = !this.stopResetFlashOn
+				this.checkFeedbacks('stop_reset_confirmation')
+			}, 350)
+			this.checkFeedbacks('stop_reset_confirmation')
+			return
+		}
+		this.cancelStopResetConfirmation()
+		await this.runReset()
+	}
+	private cancelStopResetConfirmation(): void {
+		if (this.stopResetConfirmationTimer) clearTimeout(this.stopResetConfirmationTimer)
+		if (this.stopResetFlashTimer) clearInterval(this.stopResetFlashTimer)
+		const wasPending = this.stopResetConfirmationPending
+		this.stopResetConfirmationTimer = undefined
+		this.stopResetFlashTimer = undefined
+		this.stopResetConfirmationPending = false
+		this.stopResetFlashOn = false
+		if (wasPending) this.checkFeedbacks('stop_reset_confirmation')
 	}
 	private async runReset(): Promise<void> {
 		const documentId = this.documentId()
@@ -1311,10 +1717,17 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			await this.send(data)
 			// The wire reset moves the visible scroll to zero. Mirror that locally so
 			// the following Play uses zero rather than the prior pause position.
-			this.playbackStartedAt = undefined
-			this.documentTiming.set(documentId, { keyPosition: 0, keyTime: 0.002 })
+			this.documentTiming.set(documentId, {
+				...this.documentTiming.get(documentId),
+				keyPosition: 0,
+				keyTime: 0,
+				scrolledPosition: 0,
+				receivedAt: Date.now(),
+			})
+			this.documentMotions.set(documentId, 'stopped')
+			this.documentTimerStarts.delete(documentId)
 			this.updateSegmentStatus()
-			this.timerNeedsStart.add(documentId)
+			this.refreshTimerStatus()
 			this.setPlaybackState('stopped')
 			this.log('info', 'Stop & Reset sent')
 		} catch (error) {
@@ -1324,31 +1737,38 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		}
 	}
 	private async adjustSpeed(percentDelta: number): Promise<void> {
+		this.cancelStopResetConfirmation()
 		if (!(await this.refreshDocuments())) throw new Error('Unable to synchronize the current speed; command not sent')
 		const documentId = this.documentId()
 		const current = this.documentSpeeds.get(documentId)
 		if (current === undefined) throw new Error('Teleprompter did not provide its current speed; command not sent')
-		const next = clampManualSpeed(current + percentDelta * 5)
-		await this.send(speedMutation(documentId, next, this.nextSequence()))
+		await this.setManualSpeed(current + percentDelta * 5, false)
+	}
+	private async setManualSpeed(requested: number, synchronize = true): Promise<void> {
+		this.cancelStopResetConfirmation()
+		if (synchronize && !(await this.refreshDocuments()))
+			throw new Error('Unable to synchronize the current speed; command not sent')
+		const documentId = this.documentId()
+		if (this.documentSelectors.get(documentId) === 'timed')
+			throw new Error('Teleprompter is using timed playback; manual speed is inactive')
+		const next = clampManualSpeed(requested, this.documentMaximumSpeeds.get(documentId))
+		const timing = this.currentTiming(documentId)
+		await this.send(speedMutation(documentId, next, { ...timing, keyTime: 0, receivedAt: Date.now() }, this.nextSequence()))
+		this.documentTiming.set(documentId, { ...timing, keyTime: 0, receivedAt: Date.now() })
 		this.setDocumentSpeed(documentId, next)
+	}
+	private async setPlaybackMode(selector: 'manual' | 'timed'): Promise<void> {
+		this.cancelStopResetConfirmation()
+		if (!(await this.refreshDocuments())) throw new Error('Unable to synchronize the playback mode; command not sent')
+		const documentId = this.documentId()
+		await this.send(selectorMutation(documentId, selector, this.nextSequence()))
+		this.setDocumentSelector(documentId, selector)
 	}
 	private currentTiming(documentId: string): TimingState {
 		const timing = this.documentTiming.get(documentId) ?? { keyPosition: 0, keyTime: 0 }
-		if (this.motion === 'stopped' || this.playbackStartedAt === undefined) return timing
-		// TP Controller moves approximately one document point per second for
-		// each manualSpeed unit (for example manualSpeed 200 measured ~200 pts/s).
-		// This estimate is used only to make Pause preserve the current location.
-		return estimateTiming(
-			timing,
-			this.motion,
-			this.documentSpeeds.get(documentId) ?? 100,
-			this.playbackStartedAt,
-			Date.now(),
-		)
-	}
-	private commitEstimatedPosition(): void {
-		if (!this.config.documentId) return
-		this.documentTiming.set(this.config.documentId, this.currentTiming(this.config.documentId))
+		const motion = this.documentMotions.get(documentId) ?? this.motion
+		const keyPosition = evaluateTiming(timing, motion, this.documentSpeeds.get(documentId) ?? 100, Date.now())
+		return { ...timing, keyPosition, keyTime: 0, receivedAt: Date.now(), scrolledPosition: keyPosition }
 	}
 	private async send(data: Buffer): Promise<void> {
 		if (this.bridge) {
@@ -1366,6 +1786,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	}
 	public async destroy(): Promise<void> {
 		this.destroyed = true
+		this.cancelStopResetConfirmation()
 		this.disconnect()
 		if (this.discoveryRefreshTimer) clearInterval(this.discoveryRefreshTimer)
 		this.browser?.stop()

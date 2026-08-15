@@ -1,6 +1,6 @@
 {
 	"name": "companion-module-pavonine-teleprompter",
-	"version": "0.6.19",
+	"version": "0.7.14",
 	"description": "Experimental Bitfocus Companion control for Pavonine Teleprompter",
 	"main": "dist/main.js",
 	"type": "module",
@@ -30,7 +30,7 @@
 		"bonjour-service": "^1.4.4"
 	},
 	"devDependencies": {
-		"@companion-module/tools": "^3.0.1",
+		"@companion-module/tools": "patch:@companion-module/tools@npm%3A3.0.2#~/.yarn/patches/@companion-module-tools-npm-3.0.2-ea5420fbc3.patch",
 		"@types/node": "^22.19.17",
 		"node-api-headers": "1.9.0",
 		"prettier": "^3.8.3",
