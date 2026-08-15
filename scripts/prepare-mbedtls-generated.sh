@@ -14,6 +14,16 @@ driver_error="$library_directory/tf-psa-crypto/drivers/builtin/src/error.c"
 
 mkdir -p "$core_directory" "$(dirname "$driver_error")"
 "$python_executable" "$mbedtls_directory/tf-psa-crypto/scripts/generate_driver_wrappers.py" "$core_directory"
+# Visual Studio may compile tf-psa-crypto before the target which normally
+# generates its configuration-check headers.  Pre-create those too.
+(
+	cd "$mbedtls_directory"
+	"$python_executable" scripts/generate_config_checks.py "$library_directory"
+)
+(
+	cd "$mbedtls_directory/tf-psa-crypto"
+	"$python_executable" scripts/generate_config_checks.py "$core_directory"
+)
 perl "$mbedtls_directory/scripts/generate_errors.pl" \
 	"$mbedtls_directory/tf-psa-crypto/drivers/builtin/include/mbedtls" \
 	"$mbedtls_directory/include/mbedtls" \
