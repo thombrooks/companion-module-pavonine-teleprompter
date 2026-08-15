@@ -169,3 +169,82 @@ jobs:
           name: tls-linux-${{ matrix.arch }}
           path: prebuilds
           if-no-files-found: error
+
+  darwin:
+    name: darwin-${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+          - os: macos-13
+            arch: x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install JavaScript dependencies
+        run: corepack enable && yarn install --immutable
+      - name: Install Mbed TLS build dependencies
+        run: python -m pip install -r scripts/requirements-mbedtls.txt
+      - name: Compile portable TLS addon
+        run: |
+          cmake -S native -B native-build \
+            -DNODE_API_INCLUDE="$PWD/node_modules/node-api-headers/include" \
+            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$PWD/native-build/output" \
+            -DPython3_EXECUTABLE="$(command -v python)" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          cmake --build native-build --target teleprompter_tls_addon --parallel
+      - name: Load the compiled N-API addon
+        run: >-
+          node -e "const a=require('./native-build/output/teleprompter-tls-addon.node'); if(typeof a.start !== 'function'||typeof a.send !== 'function') process.exit(1)"
+      - name: Stage package prebuild
+        run: >-
+          node_modules/.bin/pkg-prebuilds-copy
+          --baseDir native-build/output --source teleprompter-tls-addon.node
+          --name teleprompter-tls-addon --napi_version 10
+          --platform darwin --arch "${{ matrix.arch }}"
+      - name: Upload package prebuild
+        uses: actions/upload-artifact@v4
+        with:
+          name: tls-darwin-${{ matrix.arch }}
+          path: prebuilds
+          if-no-files-found: error
+
+  assemble:
+    name: Assemble multi-platform archive
+    needs: [native-host, windows-arm64, linux-cross, darwin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install JavaScript dependencies
+        run: corepack enable && yarn install --immutable
+      - name: Build TypeScript
+        run: node_modules/.bin/tsc -p tsconfig.build.json
+      - name: Download all platform prebuilds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tls-*
+          path: prebuilds
+          merge-multiple: true
+      - name: Build importable archive
+        run: node_modules/.bin/companion-module-build
+      - name: Upload module archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: companion-module
+          path: '*.tgz'
+          if-no-files-found: error
