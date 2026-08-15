@@ -12,7 +12,7 @@
 	"license": "MIT",
 	"repository": "git+https://github.com/thombrooks/companion-module-pavonine-teleprompter.git",
 	"bugs": "https://github.com/thombrooks/companion-module-pavonine-teleprompter/issues",
-	"maintainers": [{ "name": "Local developer", "email": "developer@example.invalid" }],
+	"maintainers": [{ "name": "Thom Brooks", "email": "thom.brooks@gmail.com" }],
 	"legacyIds": [],
 	"runtime": {
 		"type": "node22",
