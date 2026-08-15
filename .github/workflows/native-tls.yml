@@ -1,0 +1,125 @@
+name: Native TLS prebuilds
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  native-host:
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: darwin
+            arch: x64
+            publish: false
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            publish: true
+          - os: windows-latest
+            platform: win32
+            arch: x64
+            publish: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install JavaScript dependencies
+        run: corepack enable && yarn install --immutable
+      - name: Install Mbed TLS build dependencies
+        run: python -m pip install -r scripts/requirements-mbedtls.txt
+      - name: Compile portable TLS addon
+        shell: bash
+        run: >-
+          cmake -S native -B native-build
+          -DNODE_API_INCLUDE="$PWD/node_modules/node-api-headers/include"
+          -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$PWD/native-build/output"
+          -DPython3_EXECUTABLE="$(command -v python)"
+          && cmake --build native-build --target teleprompter_tls_addon --config Release --parallel
+      - name: Load the compiled N-API addon
+        shell: bash
+        run: >-
+          node -e "const a=require('./native-build/output/teleprompter-tls-addon.node'); if(typeof a.start !== 'function'||typeof a.send !== 'function') process.exit(1)"
+      - name: Stage package prebuild
+        if: matrix.publish
+        shell: bash
+        run: >-
+          node_modules/.bin/pkg-prebuilds-copy
+          --baseDir native-build/output --source teleprompter-tls-addon.node
+          --name teleprompter-tls-addon --napi_version 10
+          --platform "${{ matrix.platform }}" --arch "${{ matrix.arch }}"
+      - name: Upload package prebuild
+        if: matrix.publish
+        uses: actions/upload-artifact@v4
+        with:
+          name: tls-${{ matrix.platform }}-${{ matrix.arch }}
+          path: prebuilds
+          if-no-files-found: error
+
+  linux-cross:
+    name: linux-${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            compiler: aarch64-linux-gnu
+            processor: aarch64
+          - arch: arm
+            compiler: arm-linux-gnueabihf
+            processor: armv7l
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        shell: bash
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          gcc-${{ matrix.compiler }} g++-${{ matrix.compiler }}
+          && python -m pip install -r scripts/requirements-mbedtls.txt
+          && corepack enable && yarn install --immutable
+      - name: Cross-compile portable TLS addon
+        shell: bash
+        run: >-
+          cmake -S native -B native-build
+          -DNODE_API_INCLUDE="$PWD/node_modules/node-api-headers/include"
+          -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$PWD/native-build/output"
+          -DPython3_EXECUTABLE="$(command -v python)"
+          -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR="${{ matrix.processor }}"
+          -DCMAKE_C_COMPILER="${{ matrix.compiler }}-gcc"
+          -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}-g++"
+          && cmake --build native-build --target teleprompter_tls_addon --parallel
+      - name: Stage package prebuild
+        shell: bash
+        run: >-
+          node_modules/.bin/pkg-prebuilds-copy
+          --baseDir native-build/output --source teleprompter-tls-addon.node
+          --name teleprompter-tls-addon --napi_version 10
+          --platform linux --arch "${{ matrix.arch }}"
+      - name: Upload package prebuild
+        uses: actions/upload-artifact@v4
+        with:
+          name: tls-linux-${{ matrix.arch }}
+          path: prebuilds
+          if-no-files-found: error

@@ -2,6 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#define strdup _strdup
+#endif
+
 struct Payload { uint8_t* bytes; size_t length; };
 extern "C" void* tp_start(const char*, uint16_t, const uint8_t*, int, void*, void (*)(void*), void (*)(void*, const uint8_t*, int), void (*)(void*, const char*));
 extern "C" void tp_close(void*);
