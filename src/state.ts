@@ -3,6 +3,17 @@ import net from 'node:net'
 
 import type { Motion, TimingState } from './protocol.js'
 
+/**
+ * Four mutually exclusive visual states for a numbered segment button.
+ * Keep this separate from command availability: it is purely operator feedback.
+ */
+export type SegmentButtonState = 'active-moving' | 'active-paused' | 'inactive-moving' | 'inactive-paused'
+
+export function segmentButtonState(motion: Motion, isActive: boolean): SegmentButtonState {
+	if (isActive) return motion === 'stopped' ? 'active-paused' : 'active-moving'
+	return motion === 'stopped' ? 'inactive-paused' : 'inactive-moving'
+}
+
 export function addressPreference(address: string): number {
 	if (net.isIP(address) === 4) return 0
 	if (net.isIP(address) === 6 && !address.toLowerCase().startsWith('fe80:')) return 1
@@ -15,9 +26,16 @@ export function preferredHosts(addresses: string[], localAddresses: ReadonlySet<
 	return unique.sort((a, b) => addressPreference(a) - addressPreference(b))
 }
 
+export function networkKeyMaterial(networkKey: string, deviceId: string): Buffer {
+	const key = networkKey.trim()
+	// Teleprompter currently passes a grapheme count where PBKDF2 expects a UTF-8
+	// byte length. Reproduce that interoperability quirk exactly.
+	const password = Buffer.from(key, 'utf8').subarray(0, [...key].length)
+	return pbkdf2Sync(password, deviceId, 4096, 32, 'sha256')
+}
+
 export function networkKeyChallenge(networkKey: string, deviceId: string): string {
-	const material = pbkdf2Sync(networkKey.trim(), deviceId, 4096, 32, 'sha256')
-	return createHash('sha256').update(material).digest('base64')
+	return createHash('sha256').update(networkKeyMaterial(networkKey, deviceId)).digest('base64')
 }
 
 export function hasDifferentNetworkKey(networkKey: string, deviceId: string, challenge: string | undefined): boolean {
@@ -26,12 +44,13 @@ export function hasDifferentNetworkKey(networkKey: string, deviceId: string, cha
 	return key ? challenge !== networkKeyChallenge(key, deviceId) : challenge !== deviceId
 }
 
-export function clampManualSpeed(speed: number): number {
-	return Math.max(0, Math.min(500, speed))
+export function clampManualSpeed(speed: number, maximumSpeed?: number): number {
+	const upper = typeof maximumSpeed === 'number' && Number.isFinite(maximumSpeed) ? maximumSpeed : Infinity
+	return Math.max(0, Math.min(upper, speed))
 }
 
-export function speedLabel(speed: number): string {
-	return `${Math.round(clampManualSpeed(speed) / 5)}%`
+export function speedLabel(speed: number, maximumSpeed?: number): string {
+	return `${Math.round(clampManualSpeed(speed, maximumSpeed) / 5)}%`
 }
 
 export function selectedDocumentAfterDeviceChange(
@@ -69,14 +88,12 @@ export function documentStatus(
 	return `CLOSED\n${selectedDocumentName || 'DOCUMENT'}`
 }
 
-export function estimateTiming(
-	timing: TimingState,
-	motion: Motion,
-	speed: number,
-	startedAt: number | undefined,
-	now: number,
-): TimingState {
-	if (motion === 'stopped' || startedAt === undefined) return timing
+/** Evaluate Teleprompter's own timing state; do not invent a local playback clock. */
+export function evaluateTiming(timing: TimingState, motion: Motion, speed: number, now: number): number {
+	const maximum = timing.maximumPosition ?? Infinity
+	if (motion === 'stopped') return Math.max(0, Math.min(maximum, timing.scrolledPosition ?? timing.keyPosition))
+	const receivedAt = timing.receivedAt ?? 0
+	const elapsedSeconds = timing.keyTime + (now - receivedAt) / 1000
 	const direction = motion === 'reverse' ? -1 : 1
-	return { ...timing, keyPosition: Math.max(0, timing.keyPosition + direction * ((now - startedAt) / 1000) * speed) }
+	return Math.max(0, Math.min(maximum, timing.keyPosition + direction * elapsedSeconds * speed))
 }

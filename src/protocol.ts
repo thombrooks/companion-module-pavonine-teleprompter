@@ -2,108 +2,114 @@ import { randomBytes, randomUUID } from 'node:crypto'
 
 export type Motion = 'forward' | 'reverse' | 'stopped'
 
-/**
- * Wire format observed in Teleprompter 3.1.1: an unsigned 64-bit little-endian
- * byte length, followed by a UTF-8 JSON CollaborativeKit TreeMessage.
- */
+export interface TimingState {
+	keyPosition: number
+	/** Seconds elapsed between the local timing keypoint and serialization. */
+	keyTime: number
+	scrolledPosition?: number
+	maximumPosition?: number
+	/** Local receipt time, used to reconstruct the sender's keypoint. */
+	receivedAt?: number
+}
+
+/** Frame a UTF-8 TreeMessage with Teleprompter's signed Int64 LE length header. */
 export function frame(payload: string): Buffer {
 	const body = Buffer.from(payload, 'utf8')
 	const header = Buffer.alloc(8)
-	header.writeBigUInt64LE(BigInt(body.length))
+	header.writeBigInt64LE(BigInt(body.length))
 	return Buffer.concat([header, body])
 }
 
-function randomUInt64(): string {
-	return randomBytes(8).readBigUInt64LE().toString()
+function randomUInt64(): bigint {
+	let value = randomBytes(8).readBigUInt64LE()
+	// The amendment after the first operation must be a fresh random64, not zero.
+	if (value === 0n) value = 1n
+	return value
 }
 
-function mutation(documentId: string, changes: Array<[string[], unknown]>, sequence: bigint): string {
-	const actor = randomUUID().toUpperCase()
-	const index = randomUInt64()
-	// JSON.stringify cannot preserve the 64-bit CRDT clock values. They are emitted
-	// as decimal JSON integer literals, matching CollaborativeKit's Swift encoder.
+function delta(value: bigint): string {
+	if (value < 0n) throw new Error('Teleprompter mutation clocks must be non-negative')
+	const limbs: string[] = []
+	let remaining = value
+	do {
+		limbs.unshift((remaining & ((1n << 64n) - 1n)).toString())
+		remaining >>= 64n
+	} while (remaining > 0n)
+	return `["+",${limbs.join(',')}]`
+}
+
+function mutation(documentId: string, changes: Array<[string[], unknown]>, index: bigint): string {
+	const messageUuid = randomUUID().toUpperCase()
 	const changesJson = changes
-		.map(([path, value]) => {
-			const amendment = randomUInt64()
-			return `[${JSON.stringify(['documents', documentId, 'model', ...path])},[1,[${JSON.stringify(value)},{"index":["+",${sequence.toString()},${index}],"ammendment":["+",${amendment}]}],false]]`
+		.map(([path, value], operation) => {
+			const amendment = operation === 0 ? 0n : randomUInt64()
+			return `[${JSON.stringify(['documents', documentId, 'model', ...path])},[1,[${JSON.stringify(value)},{"index":${delta(index)},"ammendment":${delta(amendment)}}],false]]`
 		})
 		.join(',')
-	return `["${actor}",false,[${changesJson}],0]`
+	return `["${messageUuid}",false,[${changesJson}],0]`
 }
 
-export interface TimingState {
-	keyPosition: number
-	keyTime: number
+function keypointChanges(timing: TimingState): Array<[string[], unknown]> {
+	return [
+		[['timing', 'keyPosition'], [2, ['CGFloat', timing.keyPosition]]],
+		[['timing', 'keyTime'], [2, ['Delta', 0]]],
+	]
 }
 
-/**
- * TP Controller changes transport with one atomic CRDT operation. Sending only
- * `motion` omits its anchor time/position and can make the host jump to EOF.
- */
+/** Every transport change establishes a fresh keypoint in the same TreeMessage. */
 export function transportMutation(
 	documentId: string,
 	motion: Motion,
 	timing: TimingState,
-	sequence: bigint,
-	startTimer: boolean,
+	index: bigint,
+	startTimer = false,
 ): Buffer {
-	const timingBase = ['timing']
-	const position: [string[], unknown] = [[...timingBase, 'keyPosition'], [2, ['CGFloat', timing.keyPosition]]]
-	const keyTime: [string[], unknown] = [[...timingBase, 'keyTime'], [2, ['Delta', timing.keyTime]]]
+	const changes = keypointChanges(timing)
 	if (motion === 'stopped') {
-		// TP Controller includes the current position and visible scroll position
-		// in its pause transaction; this preserves the point reached while playing.
-		return frame(
-			mutation(
-				documentId,
-				[
-					position,
-					keyTime,
-					[[...timingBase, 'scrolledPosition'], [2, ['CGFloat', timing.keyPosition]]],
-					[[...timingBase, 'motion'], [1]],
-				],
-				sequence,
-			),
-		)
+		changes.push([['timing', 'scrolledPosition'], [2, ['CGFloat', timing.keyPosition]]])
+		changes.push([['timing', 'motion'], [1]])
+	} else {
+		changes.push([['timing', 'motion'], [2, ['Timing.Motion', motion]]])
+		if (motion === 'forward' && startTimer) changes.push([['timerInfo', 'timerStart'], [2, ['Delta', 0]]])
 	}
-	const changes: Array<[string[], unknown]> = [
-		position,
-		keyTime,
-		[[...timingBase, 'motion'], [2, ['Timing.Motion', motion]]],
-	]
-	// TP Controller starts the elapsed-time timer after Stop & Reset, but does
-	// not restart it when resuming from an ordinary pause.
-	if (startTimer) changes.push([['timerInfo', 'timerStart'], [2, ['Delta', 0.002]]])
-	return frame(mutation(documentId, changes, sequence))
+	return frame(mutation(documentId, changes, index))
 }
 
-export function speedMutation(documentId: string, speed: number, sequence: bigint): Buffer {
-	return frame(mutation(documentId, [[['timing', 'manualSpeed'], [2, ['Double', speed]]]], sequence))
+/** A speed write without a keypoint retroactively changes elapsed movement. */
+export function speedMutation(documentId: string, speed: number, timing: TimingState, index: bigint): Buffer {
+	return frame(mutation(documentId, [...keypointChanges(timing), [['timing', 'manualSpeed'], [2, ['Double', speed]]]], index))
 }
 
-/** Observed TP Controller segment jumps update the old anchor and visible position only. */
-export function segmentJumpMutation(documentId: string, currentPosition: number, targetPosition: number, sequence: bigint): Buffer {
+/** Select Teleprompter's manual-speed or automatic marker-timing mode. */
+export function selectorMutation(documentId: string, selector: 'manual' | 'timed', index: bigint): Buffer {
+	return frame(mutation(documentId, [[['timing', 'selector'], [2, ['Timing.Selector', selector]]]], index))
+}
+
+/** Segment navigation writes paused scroll state and is only issued while paused. */
+export function segmentJumpMutation(documentId: string, currentPosition: number, targetPosition: number, index: bigint): Buffer {
 	return frame(
 		mutation(
 			documentId,
 			[
 				[['timing', 'keyPosition'], [2, ['CGFloat', currentPosition]]],
-				[['timing', 'keyTime'], [2, ['Delta', 0.002]]],
+				[['timing', 'keyTime'], [2, ['Delta', 0]]],
 				[['timing', 'scrolledPosition'], [2, ['CGFloat', targetPosition]]],
 			],
-			sequence,
+			index,
 		),
 	)
 }
 
-export function resetMutation(documentId: string, sequence: bigint): Buffer {
-	const actor = randomUUID().toUpperCase()
-	const index = randomUInt64()
-	const amendment = randomUInt64()
-	const position = JSON.stringify(['CGFloat', 0])
-	const stopped = JSON.stringify([1])
-	const base = ['documents', documentId, 'model', 'timing']
+export function resetMutation(documentId: string, index: bigint): Buffer {
 	return frame(
-		`["${actor}",false,[[${JSON.stringify([...base, 'motion'])},[1,[${stopped},{"index":["+",${sequence.toString()},${index}],"ammendment":["+",${amendment}]}],false]],[${JSON.stringify([...base, 'scrolledPosition'])},[1,[[2,${position}],{"index":["+",${sequence.toString()},${index}],"ammendment":["+",${amendment}]}],false]]],0]`,
+		mutation(
+			documentId,
+			[
+				[['timing', 'motion'], [1]],
+				[['timing', 'scrolledPosition'], [2, ['CGFloat', 0]]],
+				[['timerInfo', 'timerStart'], [1]],
+			],
+			index,
+		),
 	)
 }

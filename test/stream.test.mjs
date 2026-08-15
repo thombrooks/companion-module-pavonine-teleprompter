@@ -15,10 +15,10 @@ test('reassembles one frame split across arbitrary TCP chunks', () => {
 	assert.equal(second.remainder.length, 0)
 })
 
-test('consumes concatenated frames and ignores zero-length keepalives at the caller', () => {
+test('silently skips zero-length keepalives and continues reading the following frame', () => {
 	const combined = Buffer.concat([frame('one'), frame(''), frame('two')])
 	const result = decodeFrames(combined)
-	assert.deepEqual(result.frames.map((value) => value.toString()), ['one', '', 'two'])
+	assert.deepEqual(result.frames.map((value) => value.toString()), ['one', 'two'])
 	assert.equal(result.remainder.length, 0)
 })
 
@@ -30,10 +30,21 @@ test('keeps an incomplete trailing frame for the next TCP chunk', () => {
 	assert.deepEqual(result.remainder, second.subarray(0, 10))
 })
 
-test('rejects an impossible frame length without retaining unsafe buffered data', () => {
-	const header = Buffer.alloc(8)
-	header.writeBigUInt64LE(BigInt(Number.MAX_SAFE_INTEGER) + 1n)
-	const result = decodeFrames(header)
-	assert.equal(result.impossibleLength, true)
+test('silently skips an invalid signed or oversized header and re-reads the next header', () => {
+	const negative = Buffer.alloc(8)
+	negative.writeBigInt64LE(-1n)
+	const oversized = Buffer.alloc(8)
+	oversized.writeBigInt64LE(2n ** 32n)
+	const result = decodeFrames(Buffer.concat([negative, oversized, frame('after')]))
+	assert.deepEqual(result.frames.map((value) => value.toString()), ['after'])
+	assert.equal(result.impossibleLength, false)
 	assert.equal(result.remainder.length, 0)
+})
+
+test('retains an incomplete valid frame after invalid headers were skipped', () => {
+	const header = Buffer.alloc(8)
+	header.writeBigInt64LE(10n)
+	const result = decodeFrames(Buffer.concat([Buffer.alloc(8), header, Buffer.from('abc')]))
+	assert.equal(result.impossibleLength, false)
+	assert.deepEqual(result.remainder, Buffer.concat([header, Buffer.from('abc')]))
 })

@@ -1,6 +1,6 @@
 # Pavonine Teleprompter (experimental)
 
-This module drives Pavonine Teleprompter 3 using its observed local collaborative-document protocol. It has been verified against Teleprompter 3.1.1, but it is not an official integration.
+This module drives Pavonine Teleprompter 3 using its observed local collaborative-document protocol. It has been verified against Teleprompter 3.1.1, but it is not an official integration. It supports macOS on both Apple Silicon and Intel; Windows and Linux are not supported because the Teleprompter TLS transport helper is macOS-native.
 
 Choose the Teleprompter from the **Teleprompter device** picker. The module reads the Bonjour record itself, collapses address variants by Teleprompter’s challenge UUID, and displays the advertised friendly name (for example, “Thom’s MacBook Air”). Teleprompter advertises its current TCP port. If Bonjour is unavailable, enable **Configure manually** and enter the host and port (the port is dynamic; check the app's advertised service rather than assuming `65330`). Do not use `127.0.0.1`: Teleprompter does not listen on its loopback address.
 
