@@ -221,7 +221,7 @@ jobs:
       - name: Build consolidated package
         run: >-
           MBEDTLS_PYTHON="$(command -v python)" yarn build
-          && yarn exec companion-module-build --prerelease --output pavonine-teleprompter-${{ github.sha }}
+          && yarn exec companion-module-build --output pavonine-teleprompter-${{ github.sha }}
       - name: Verify package native payloads
         run: node scripts/verify-package.mjs pavonine-teleprompter-${{ github.sha }}.tgz
       - name: Upload consolidated package
