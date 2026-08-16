@@ -9,7 +9,7 @@ get_filename_component(TELEPROMPTER_SOURCE_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." R
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 	add_compile_options("-ffile-prefix-map=${TELEPROMPTER_SOURCE_ROOT}=.")
 elseif(MSVC)
-	add_compile_options("/pathmap:${TELEPROMPTER_SOURCE_ROOT}=.")
+	add_compile_options("/experimental:deterministic" "/pathmap:${TELEPROMPTER_SOURCE_ROOT}=.")
 endif()
 
 # Ship a self-contained Windows addon rather than requiring a separately
