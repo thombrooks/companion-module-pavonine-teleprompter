@@ -65,6 +65,7 @@ Use a sacrificial copy of a script, not an active production script. Keep both t
 - [ ] On each supported Linux and Windows host, a matching network key authenticates successfully and at least one playback action works without a native-addon load error.
 - [ ] With an intentionally wrong key, the device remains visible as **Different Network Key** and no document is offered.
 - [ ] Set the playhead in the middle of the script, then test Forward → Pause → Forward. It resumes smoothly at the same place.
+- [ ] After Stop & Reset, verify Elapsed remains at zero until first Forward, then continues while moving or paused. While paused at a fixed playhead, Remaining remains fixed, Total and Ahead / Behind continue changing with the show clock. Scrubbing changes Remaining and Total immediately.
 - [ ] From a mid-script position, test Reverse → Pause → Reverse. It resumes smoothly and does not jump toward either end.
 - [ ] Test Forward directly to Reverse and Reverse directly to Forward; the selected direction takes over without a playhead jump.
 - [ ] Test Stop & Reset, then Forward. It begins at the script start at normal speed.

@@ -36,6 +36,7 @@ import {
 	preferredHosts,
 	selectedDocumentAfterDeviceChange,
 	segmentButtonState,
+	showTimerTotal,
 	speedLabel,
 } from './state.js'
 import { decodeFrames } from './stream.js'
@@ -587,7 +588,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					if (!values?.aheadBehind) return { text: 'Ahead\n—', size: '14', color: 0xffffff, bgcolor: 0x000000 }
 					const ahead = values.aheadBehind >= 0
 					return {
-						text: `${ahead ? 'Ahead' : 'Behind'}\n${formatDuration(Math.abs(values.aheadBehind))}`,
+						text: `${ahead ? 'Ahead' : 'Behind'}\n${ahead ? '' : '-'}${formatDuration(Math.abs(values.aheadBehind))}`,
 						size: '14',
 						color: 0xffffff,
 						bgcolor: ahead ? 0x00aa00 : 0x8b0000,
@@ -668,7 +669,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					const segment = this.currentSegments().find((candidate) => candidate.index === index)
 					return {
 						text: segment ? `${segment.index}\n${segment.name}` : `SEGMENT\n${index}`,
-						size: '14',
+						size: segment ? '14' : 12,
 					}
 				},
 			},
@@ -1082,12 +1083,12 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		if (this.noDocumentTimer) clearTimeout(this.noDocumentTimer)
 		if (this.documentRefreshTimer) clearTimeout(this.documentRefreshTimer)
 		if (this.segmentStatusTimer) clearInterval(this.segmentStatusTimer)
-		if (this.timerStatusTimer) clearInterval(this.timerStatusTimer)
+		if (this.destroyed && this.timerStatusTimer) clearInterval(this.timerStatusTimer)
 		this.reconnectTimer = undefined
 		this.noDocumentTimer = undefined
 		this.documentRefreshTimer = undefined
 		this.segmentStatusTimer = undefined
-		this.timerStatusTimer = undefined
+		if (this.destroyed) this.timerStatusTimer = undefined
 		this.socket?.destroy()
 		this.socket = undefined
 		if (this.bridge && this.nativeTlsAddon) this.nativeTlsAddon.close(this.bridge)
@@ -1315,6 +1316,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 							})
 							this.documentTimingSnapshots.set(documentId, Date.now())
 							this.updateSegmentStatus()
+							if (documentId === this.config.documentId) this.updateDocumentStatus()
 						}
 						if (speed !== undefined) this.setDocumentSpeed(documentId, speed)
 						if (maximumSpeed !== undefined) this.documentMaximumSpeeds.set(documentId, maximumSpeed)
@@ -1528,27 +1530,29 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		const timerStart = this.documentTimerStarts.get(documentId)
 		const elapsed = timerStart ? timerStart.elapsed + (Date.now() - timerStart.receivedAt) / 1000 : 0
 		const timing = this.currentTiming(documentId)
-		const maximum = timing.maximumPosition
-		if (maximum === undefined) return { elapsed }
 		const position = timing.keyPosition
 		const points = this.documentTimingFunctions.get(documentId) ?? []
 		const scheduled = interpolateTimerTime(points, position)
 		if (this.selectedPlaybackMode() === 'timed' && points.length && scheduled !== undefined) {
-			const total = points.at(-1)?.time
+			const scheduledTotal = points.at(-1)?.time
+			const remaining = scheduledTotal === undefined ? undefined : Math.max(0, scheduledTotal - scheduled)
 			return {
 				elapsed,
-				total,
-				remaining: total === undefined ? undefined : Math.max(0, total - scheduled),
+				total: remaining === undefined ? undefined : showTimerTotal(elapsed, remaining),
+				remaining,
 				aheadBehind: scheduled - elapsed,
 			}
 		}
+		const maximum = timing.maximumPosition
+		if (maximum === undefined) return { elapsed, aheadBehind: scheduled === undefined ? undefined : scheduled - elapsed }
 		const speed = this.documentSpeeds.get(documentId)
 		if (speed === undefined || speed <= 0)
 			return { elapsed, aheadBehind: scheduled === undefined ? undefined : scheduled - elapsed }
+		const remaining = Math.max(0, maximum - position) / speed
 		return {
 			elapsed,
-			total: maximum / speed,
-			remaining: Math.max(0, maximum - position) / speed,
+			total: showTimerTotal(elapsed, remaining),
+			remaining,
 			aheadBehind: scheduled === undefined ? undefined : scheduled - elapsed,
 		}
 	}

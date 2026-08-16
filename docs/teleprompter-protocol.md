@@ -117,6 +117,19 @@ When `selector` is `timed` and `markersTimingFunction` is present, the manual sp
 is ignored; marker timing determines velocity. The module must make this state
 visible and must not represent an ineffective manual-speed action as a success.
 
+## Show timers
+
+`model/timerInfo/timerStart` establishes the show clock on the first forward play
+after Stop & Reset. Once started, **Elapsed** continues advancing while the
+playhead is paused, moving, or being scrubbed; it does not stop when prompting is
+paused. **Remaining** is derived from the current playhead position and remains
+fixed while paused. **Total** is the live sum of elapsed show time and the
+position-derived remaining duration. It therefore starts as the estimated
+start-to-finish duration after Stop & Reset, decreases as the playhead moves
+forward, and rises while the playhead remains paused because Elapsed continues.
+**Ahead / Behind** compares the position's scheduled elapsed time with the live
+Elapsed show clock.
+
 ## Compliant control mutations
 
 Every timing change is an atomic group of leaf writes. It first writes the current
