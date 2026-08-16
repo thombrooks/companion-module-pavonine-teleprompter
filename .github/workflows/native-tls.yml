@@ -209,8 +209,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: tls-*
-          merge-multiple: true
-          path: prebuilds
+          path: downloaded-prebuilds
+      - name: Stage downloaded prebuilds
+        shell: bash
+        run: |
+          for artifact in downloaded-prebuilds/tls-*; do
+            target="${artifact#downloaded-prebuilds/tls-}"
+            mkdir -p "prebuilds/teleprompter-tls-addon-$target"
+            mv "$artifact/node-napi-v10.node" "prebuilds/teleprompter-tls-addon-$target/node-napi-v10.node"
+          done
       - name: Build consolidated package
         run: >-
           MBEDTLS_PYTHON="$(command -v python)" yarn build
