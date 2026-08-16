@@ -66,6 +66,7 @@ struct MbedConnection {
 			if (result > 0) data(context, buffer, result);
 			else if (result != MBEDTLS_ERR_SSL_WANT_READ && result != MBEDTLS_ERR_SSL_WANT_WRITE) break;
 		}
+		if (!closed) fail("TLS connection closed", result);
 	}
 };
 

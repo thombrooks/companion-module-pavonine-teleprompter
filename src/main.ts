@@ -61,6 +61,7 @@ type NativeTlsAddon = {
 		error: (message: string) => void,
 	): unknown
 	send(connection: unknown, data: Buffer): void
+	close(connection: unknown): void
 }
 
 function loadNativeTlsAddon(moduleDirectory: string): NativeTlsAddon {
@@ -227,6 +228,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	private readonly documentTimerStarts = new Map<string, { elapsed: number; receivedAt: number }>()
 	private readonly documentTimingFunctions = new Map<string, Array<{ position: number; time: number }>>()
 	private readonly documentSegments = new Map<string, Segment[]>()
+	private nativeTlsAddon: NativeTlsAddon | undefined
 	private segmentStatusTimer: NodeJS.Timeout | undefined
 	private timerStatusTimer: NodeJS.Timeout | undefined
 	private lastSegmentStatus: string | undefined
@@ -1031,6 +1033,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
 		try {
 			const addon = loadNativeTlsAddon(moduleDirectory)
+			this.nativeTlsAddon = addon
 			this.bridge = addon.start(
 				endpoint.host,
 				String(endpoint.port),
@@ -1047,10 +1050,14 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					this.receive(data)
 				},
 				(message) => {
+					if (!this.bridge) return
 					this.connectionActive = false
 					this.updateDocumentStatus()
 					this.log('warn', `Keyed transport error: ${message}`)
 					this.updateStatus(InstanceStatus.ConnectionFailure, 'Keyed connection failed')
+					this.bridge = undefined
+					this.nativeTlsAddon = undefined
+					if (!this.destroyed) this.scheduleReconnect()
 				},
 			)
 		} catch (error) {
@@ -1067,7 +1074,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			if (this.documents.size === 0 && (this.socket || this.bridge))
 				this.updateStatus(InstanceStatus.UnknownWarning, 'Connected, but Teleprompter has not sent its document list')
 		}, 5000)
-		if (!this.networkKey()) this.scheduleDocumentRefresh()
+		this.scheduleDocumentRefresh()
 	}
 	private disconnect(): void {
 		this.connectionActive = false
@@ -1083,9 +1090,13 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.timerStatusTimer = undefined
 		this.socket?.destroy()
 		this.socket = undefined
+		if (this.bridge && this.nativeTlsAddon) this.nativeTlsAddon.close(this.bridge)
 		this.bridge = undefined
+		this.nativeTlsAddon = undefined
 		this.receiveBuffer = Buffer.alloc(0)
 		this.documentTimingSnapshots.clear()
+		this.documentTimerStarts.clear()
+		this.refreshTimerStatus()
 		this.updateDocumentStatus()
 	}
 	private scheduleReconnect(): void {
@@ -1108,8 +1119,13 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	}
 	private async refreshDocuments(): Promise<boolean> {
 		// A keyed session is TLS-PSK; the persistent bridge already receives its
-		// snapshot. Do not open an unauthenticated refresh socket alongside it.
-		if (this.networkKey()) return this.hasSelectedDocumentTimingSnapshot()
+		// snapshot. Reconnect only when that snapshot is missing, such as after
+		// Teleprompter wakes or opens a different document.
+		if (this.networkKey()) {
+			const synchronized = this.hasSelectedDocumentTimingSnapshot()
+			if (!synchronized) this.reconnectKeyed()
+			return synchronized
+		}
 		const endpoint = this.endpoint()
 		if (!endpoint || this.destroyed) return false
 		return new Promise<boolean>((resolve) => {
@@ -1156,6 +1172,13 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			socket.on('close', finish)
 			timeout = setTimeout(finish, 5000)
 		})
+	}
+	private reconnectKeyed(): void {
+		if (!this.bridge || !this.nativeTlsAddon || this.reconnectTimer) return
+		this.nativeTlsAddon.close(this.bridge)
+		this.bridge = undefined
+		this.nativeTlsAddon = undefined
+		this.scheduleReconnect()
 	}
 	private receive(data: Buffer): void {
 		const decoded = decodeFrames(Buffer.concat([this.receiveBuffer, data]))
@@ -1274,8 +1297,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 						const timing = model ? this.findCrdtObject(model.timing) : undefined
 						const timerInfo = document ? this.findCrdtObject(model?.timerInfo) : undefined
 						const timerStart = this.findTypedNumber(timerInfo?.timerStart, 'Delta')
-						if (timerStart === undefined) this.documentTimerStarts.delete(documentId)
-						else this.documentTimerStarts.set(documentId, { elapsed: timerStart, receivedAt: Date.now() })
+						if (timerStart !== undefined) this.documentTimerStarts.set(documentId, { elapsed: timerStart, receivedAt: Date.now() })
 						const speed = this.findTypedNumber(timing?.manualSpeed, 'Double')
 						const maximumSpeed = this.findTypedNumber(model?.maximumSpeed, 'Double')
 						const maximumPosition = this.findTypedNumber(model?.maximumPosition, 'CGFloat')

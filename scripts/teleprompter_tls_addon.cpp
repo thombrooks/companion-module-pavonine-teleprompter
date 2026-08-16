@@ -54,7 +54,7 @@ static void native_error(void* value, const char* message) { report_error(static
 static void finalizer(napi_env, void* value, void*) {
 	Connection* state = static_cast<Connection*>(value);
 	state->closed = true;
-	tp_close(state->native);
+	if (state->native) tp_close(state->native);
 	napi_release_threadsafe_function(state->ready, napi_tsfn_abort);
 	napi_release_threadsafe_function(state->data, napi_tsfn_abort);
 	napi_release_threadsafe_function(state->error, napi_tsfn_abort);
@@ -84,8 +84,17 @@ static napi_value send_data(napi_env env, napi_callback_info info) {
 	if (!state->closed) tp_send(state->native, static_cast<uint8_t*>(data), static_cast<int>(length));
 	napi_value result; napi_get_undefined(env, &result); return result;
 }
+static napi_value close_connection(napi_env env, napi_callback_info info) {
+	size_t argc = 1; napi_value args[1]; napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+	Connection* state; napi_get_value_external(env, args[0], reinterpret_cast<void**>(&state));
+	if (!state->closed) {
+		state->closed = true;
+		if (state->native) { tp_close(state->native); state->native = nullptr; }
+	}
+	napi_value result; napi_get_undefined(env, &result); return result;
+}
 static napi_value init(napi_env env, napi_value exports) {
-	napi_property_descriptor methods[] = {{"start", nullptr, start, nullptr, nullptr, nullptr, napi_default, nullptr}, {"send", nullptr, send_data, nullptr, nullptr, nullptr, napi_default, nullptr}};
-	napi_define_properties(env, exports, 2, methods); return exports;
+	napi_property_descriptor methods[] = {{"start", nullptr, start, nullptr, nullptr, nullptr, napi_default, nullptr}, {"send", nullptr, send_data, nullptr, nullptr, nullptr, napi_default, nullptr}, {"close", nullptr, close_connection, nullptr, nullptr, nullptr, napi_default, nullptr}};
+	napi_define_properties(env, exports, 3, methods); return exports;
 }
 NAPI_MODULE(NODE_GYP_MODULE_NAME, init)
