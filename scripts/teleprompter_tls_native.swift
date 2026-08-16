@@ -25,6 +25,7 @@ final class TLSConnection {
 			switch state {
 			case .ready: self.ready(self.context); self.receive()
 			case .failed(let e): e.localizedDescription.withCString { self.error(self.context, $0) }
+			case .cancelled: "TLS connection closed".withCString { self.error(self.context, $0) }
 			default: break
 			}
 		}
@@ -45,7 +46,7 @@ final class TLSConnection {
 	let box = TLSConnection(host: String(cString: host), port: port, key: Data(bytes: key, count: keyLength), context: context, ready: ready, data: data, error: error)
 	return Unmanaged.passRetained(box).toOpaque()
 }
-@_cdecl("tp_close") public func tp_close(_ pointer: UnsafeMutableRawPointer?) { if let pointer { let box = Unmanaged<TLSConnection>.fromOpaque(pointer).takeRetainedValue(); box.connection.cancel() } }
+@_cdecl("tp_close") public func tp_close(_ pointer: UnsafeMutableRawPointer?) { if let pointer { let box = Unmanaged<TLSConnection>.fromOpaque(pointer).takeRetainedValue(); box.connection.stateUpdateHandler = nil; box.connection.cancel() } }
 @_cdecl("tp_send") public func tp_send(_ pointer: UnsafeMutableRawPointer?, _ bytes: UnsafePointer<UInt8>, _ length: Int) {
 	guard let pointer else { return }
 	let box = Unmanaged<TLSConnection>.fromOpaque(pointer).takeUnretainedValue()

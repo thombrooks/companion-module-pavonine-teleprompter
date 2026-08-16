@@ -13,7 +13,7 @@ Companion's [development-environment guidance](https://companion.free/for-develo
 
 The native TLS addon is compiled under that same Node 22 runtime. It uses the pinned `node-api-headers` package rather than a machine-specific Node installation, because Companion distributes a runtime executable but not C/C++ development headers. The addon uses stable N-API only; it does not use Node/V8 ABI-specific APIs.
 
-The experimental cross-platform TLS implementation vendors Mbed TLS as the pinned `third_party/mbedtls` submodule. Initialise it before building, and give Mbed TLS a Python environment containing its code-generation dependency:
+The cross-platform TLS implementation vendors Mbed TLS as the pinned `third_party/mbedtls` submodule. Initialise it before building, and give Mbed TLS a Python environment containing its code-generation dependency:
 
 ```sh
 git submodule update --init --recursive
@@ -22,9 +22,9 @@ python3 -m venv .venv-mbedtls
 MBEDTLS_PYTHON="$PWD/.venv-mbedtls/bin/python" yarn build
 ```
 
-The existing macOS Network.framework helper is deliberately retained for the macOS x64 prebuild while the Mbed TLS transport is validated. Apple Silicon builds statically link Mbed TLS, so they do not carry a helper dylib.
+The existing macOS Network.framework helper is deliberately retained for the macOS x64 prebuild. The Apple Silicon macOS, Linux, and Windows builds statically link Mbed TLS, so they do not carry a helper dylib.
 
-`native/CMakeLists.txt` is the portable build entry point. The CI workflow compiles and loads that addon on macOS, Linux, and Windows on every change; it does not yet publish Linux/Windows prebuilds. Publishing is deliberately gated on a keyed Teleprompter interoperability rehearsal for each target rather than merely a successful C++ compile.
+`native/CMakeLists.txt` is the portable build entry point. The CI workflow builds macOS, Linux, and Windows prebuilds on every change, assembles a consolidated package, and verifies its native payload matrix. Successful compilation does not replace a keyed Teleprompter interoperability rehearsal on each target.
 
 Install and select Node 22 with the workflow Companion recommends, then enable the pinned Yarn release:
 
@@ -62,9 +62,10 @@ Use a sacrificial copy of a script, not an active production script. Keep both t
 
 - [ ] With no network key, the device appears once despite multiple local NICs and the document picker shows the open document.
 - [ ] On macOS, with a matching network key, the device and its open document appear after authentication.
-- [ ] On a non-macOS Companion host, an unkeyed device remains controllable and entering a network key shows the explicit macOS-only keyed-transport message rather than a native-addon load error.
+- [ ] On each supported Linux and Windows host, a matching network key authenticates successfully and at least one playback action works without a native-addon load error.
 - [ ] With an intentionally wrong key, the device remains visible as **Different Network Key** and no document is offered.
 - [ ] Set the playhead in the middle of the script, then test Forward → Pause → Forward. It resumes smoothly at the same place.
+- [ ] After Stop & Reset, verify Elapsed remains at zero until first Forward, then continues while moving or paused. While paused at a fixed playhead, Remaining remains fixed, Total and Ahead / Behind continue changing with the show clock. Scrubbing changes Remaining and Total immediately.
 - [ ] From a mid-script position, test Reverse → Pause → Reverse. It resumes smoothly and does not jump toward either end.
 - [ ] Test Forward directly to Reverse and Reverse directly to Forward; the selected direction takes over without a playhead jump.
 - [ ] Test Stop & Reset, then Forward. It begins at the script start at normal speed.

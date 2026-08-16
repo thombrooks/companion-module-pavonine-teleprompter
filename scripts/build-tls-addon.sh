@@ -23,9 +23,11 @@ cmake -S "$project_dir/native" -B "$build_dir/mbedtls-arm64" \
 	-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 cmake --build "$build_dir/mbedtls-arm64" --target teleprompter_tls_addon --parallel
 swiftc -target x86_64-apple-macos11 -emit-library -O scripts/teleprompter_tls_native.swift \
+	-file-prefix-map "$project_dir=." \
 	-Xlinker -install_name -Xlinker @rpath/libteleprompter_tls_native.dylib \
 	-o "$build_dir/x86_64/libteleprompter_tls_native.dylib"
 clang++ -target x86_64-apple-macos11 -std=c++17 -O2 -fblocks -bundle -undefined dynamic_lookup \
+	-ffile-prefix-map="$project_dir=." \
 	-I"$node_api_include" \
 	-L"$build_dir/x86_64" -lteleprompter_tls_native -Wl,-rpath,@loader_path \
 	scripts/teleprompter_tls_addon.cpp -o "$build_dir/x86_64/teleprompter-tls-addon.node"

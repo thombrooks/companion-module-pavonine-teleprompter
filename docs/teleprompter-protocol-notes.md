@@ -1,5 +1,7 @@
 # Notes on `companion-module-pavonine-teleprompter`
 
+The Teleprompter author has authorized publication of these interoperability notes. They describe observed behavior, not an official protocol specification.
+
 ## What's exactly right
 
 `_teleprompter3._tcp` with a dynamic port. Eight-byte little-endian length followed by UTF-8 JSON. The eight zero bytes as keepalive, sent every five seconds by both sides. The `hostname` and `challenge` TXT keys, and `challenge == service instance name` when no key is set. PBKDF2-HMAC-SHA256(key, salt = service instance name, 4096 iterations, 32 bytes), with the TLS PSK identity and the PSK both being the raw 32 bytes, `TLS_PSK_WITH_AES_128_GCM_SHA256`, and `challenge = Base64(SHA256(P))`. The tree tags (`1` null, `2` leaf, `3` deliveree leaf, `4` inode). The `merge` flag distinguishing the initial snapshot from incremental writes. And `documents/<uuid> = [1]` as a document close.

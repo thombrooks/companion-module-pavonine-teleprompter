@@ -53,6 +53,11 @@ export function speedLabel(speed: number, maximumSpeed?: number): string {
 	return `${Math.round(clampManualSpeed(speed, maximumSpeed) / 5)}%`
 }
 
+/** Teleprompter's Total timer combines elapsed show time with remaining script time. */
+export function showTimerTotal(elapsed: number, remaining: number): number {
+	return Math.max(0, elapsed + remaining)
+}
+
 export function selectedDocumentAfterDeviceChange(
 	previousDeviceId: string,
 	nextDeviceId: string,

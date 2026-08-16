@@ -12,6 +12,7 @@ import {
 	networkKeyChallenge,
 	preferredHosts,
 	segmentButtonState,
+	showTimerTotal,
 	speedLabel,
 } from '../dist/state.js'
 
@@ -61,6 +62,13 @@ test('speed adjustments clamp at zero and at the document maximumSpeed when know
 	assert.equal(clampManualSpeed(501, 250), 250)
 	assert.equal(speedLabel(110), '22%')
 	assert.equal(speedLabel(999, 250), '50%')
+})
+
+test('Total is the live elapsed show clock plus the position-derived remaining duration', () => {
+	assert.equal(showTimerTotal(0, 360), 360)
+	assert.equal(showTimerTotal(25, 335), 360)
+	assert.equal(showTimerTotal(35, 335), 370)
+	assert.equal(showTimerTotal(35, 120), 155)
 })
 
 test('document status distinguishes connection, discovery, and a live selected document', () => {

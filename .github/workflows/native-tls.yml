@@ -53,6 +53,10 @@ jobs:
         shell: bash
         run: >-
           node -e "const a=require('./native-build/output/teleprompter-tls-addon.node'); if(typeof a.start !== 'function'||typeof a.send !== 'function') process.exit(1)"
+      - name: Verify build path is not embedded
+        shell: bash
+        run: >-
+          node -e "const b=require('node:fs').readFileSync('native-build/output/teleprompter-tls-addon.node'); if(b.includes(Buffer.from(process.env.GITHUB_WORKSPACE))) process.exit(1)"
       - name: Stage package prebuild
         if: matrix.publish
         shell: bash
@@ -66,7 +70,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tls-${{ matrix.platform }}-${{ matrix.arch }}
-          path: prebuilds
+          path: prebuilds/teleprompter-tls-addon-${{ matrix.platform }}-${{ matrix.arch }}
           if-no-files-found: error
 
   windows-arm64:
@@ -105,6 +109,10 @@ jobs:
         shell: bash
         run: >-
           node -e "const b=require('node:fs').readFileSync('native-build/output/teleprompter-tls-addon.node'); const o=b.readUInt32LE(0x3c); if(b.toString('ascii',0,2)!=='MZ'||b.toString('ascii',o,o+4)!=='PE\\0\\0'||b.readUInt16LE(o+4)!==0xaa64) process.exit(1)"
+      - name: Verify build path is not embedded
+        shell: bash
+        run: >-
+          node -e "const b=require('node:fs').readFileSync('native-build/output/teleprompter-tls-addon.node'); if(b.includes(Buffer.from(process.env.GITHUB_WORKSPACE))) process.exit(1)"
       - name: Stage package prebuild
         shell: bash
         run: >-
@@ -116,7 +124,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tls-win32-arm64
-          path: prebuilds
+          path: prebuilds/teleprompter-tls-addon-win32-arm64
           if-no-files-found: error
 
   linux-cross:
@@ -161,6 +169,10 @@ jobs:
         shell: bash
         run: >-
           node -e "const b=require('node:fs').readFileSync('native-build/output/teleprompter-tls-addon.node'); if(b[0]!==0x7f||b.toString('ascii',1,4)!=='ELF'||b.readUInt16LE(18)!==183) process.exit(1)"
+      - name: Verify build path is not embedded
+        shell: bash
+        run: >-
+          node -e "const b=require('node:fs').readFileSync('native-build/output/teleprompter-tls-addon.node'); if(b.includes(Buffer.from(process.env.GITHUB_WORKSPACE))) process.exit(1)"
       - name: Stage package prebuild
         shell: bash
         run: >-
@@ -172,7 +184,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tls-linux-${{ matrix.arch }}
-          path: prebuilds
+          path: prebuilds/teleprompter-tls-addon-linux-${{ matrix.arch }}
           if-no-files-found: error
 
   package:
@@ -197,12 +209,19 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: tls-*
-          merge-multiple: true
-          path: prebuilds
+          path: downloaded-prebuilds
+      - name: Stage downloaded prebuilds
+        shell: bash
+        run: |
+          for artifact in downloaded-prebuilds/tls-*; do
+            target="${artifact#downloaded-prebuilds/tls-}"
+            mkdir -p "prebuilds/teleprompter-tls-addon-$target"
+            mv "$artifact/node-napi-v10.node" "prebuilds/teleprompter-tls-addon-$target/node-napi-v10.node"
+          done
       - name: Build consolidated package
         run: >-
           MBEDTLS_PYTHON="$(command -v python)" yarn build
-          && yarn exec companion-module-build --prerelease --output pavonine-teleprompter-${{ github.sha }}
+          && yarn exec companion-module-build --output pavonine-teleprompter-${{ github.sha }}
       - name: Verify package native payloads
         run: node scripts/verify-package.mjs pavonine-teleprompter-${{ github.sha }}.tgz
       - name: Upload consolidated package

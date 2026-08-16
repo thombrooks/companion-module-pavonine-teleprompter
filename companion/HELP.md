@@ -1,8 +1,8 @@
 # Pavonine Teleprompter (experimental)
 
-This module drives Pavonine Teleprompter 3 using its observed local collaborative-document protocol. It has been verified against Teleprompter 3.1.1, but it is not an official integration. Unkeyed connections use Node's TCP transport and can run wherever Companion runs. Network-key-protected connections currently require macOS (Apple Silicon or Intel), because Teleprompter requires a TLS-PSK transport with raw-byte PSK identity and the bundled helper uses Apple's Network framework.
+This module drives Pavonine Teleprompter 3 using its observed local collaborative-document protocol. It has been verified against Teleprompter 3.1.1, but it is not an official integration. Unkeyed connections use Node's TCP transport and can run wherever Companion runs. Network-key-protected connections use bundled native TLS transports on macOS, Linux, and Windows for supported Apple Silicon/Intel or ARM64/x64 hosts.
 
-Choose the Teleprompter from the **Teleprompter device** picker. The module reads the Bonjour record itself, collapses address variants by Teleprompter’s challenge UUID, and displays the advertised friendly name (for example, “Thom’s MacBook Air”). Teleprompter advertises its current TCP port. If Bonjour is unavailable, enable **Configure manually** and enter the host and port (the port is dynamic; check the app's advertised service rather than assuming `65330`). Do not use `127.0.0.1`: Teleprompter does not listen on its loopback address.
+Choose the Teleprompter from the **Teleprompter device** picker. The module reads the Bonjour record itself, collapses address variants by Teleprompter’s challenge UUID, and displays the advertised friendly name (for example, “Studio Teleprompter”). Teleprompter advertises its current TCP port. If Bonjour is unavailable, enable **Configure manually** and enter the host and port (the port is dynamic; check the app's advertised service rather than assuming `65330`). Do not use `127.0.0.1`: Teleprompter does not listen on its loopback address.
 
 Setup uses two short steps because Companion refreshes configuration choices only when **Edit Connection** opens:
 

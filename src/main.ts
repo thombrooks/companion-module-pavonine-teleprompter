@@ -36,6 +36,7 @@ import {
 	preferredHosts,
 	selectedDocumentAfterDeviceChange,
 	segmentButtonState,
+	showTimerTotal,
 	speedLabel,
 } from './state.js'
 import { decodeFrames } from './stream.js'
@@ -61,6 +62,7 @@ type NativeTlsAddon = {
 		error: (message: string) => void,
 	): unknown
 	send(connection: unknown, data: Buffer): void
+	close(connection: unknown): void
 }
 
 function loadNativeTlsAddon(moduleDirectory: string): NativeTlsAddon {
@@ -227,6 +229,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	private readonly documentTimerStarts = new Map<string, { elapsed: number; receivedAt: number }>()
 	private readonly documentTimingFunctions = new Map<string, Array<{ position: number; time: number }>>()
 	private readonly documentSegments = new Map<string, Segment[]>()
+	private nativeTlsAddon: NativeTlsAddon | undefined
 	private segmentStatusTimer: NodeJS.Timeout | undefined
 	private timerStatusTimer: NodeJS.Timeout | undefined
 	private lastSegmentStatus: string | undefined
@@ -585,7 +588,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					if (!values?.aheadBehind) return { text: 'Ahead\n—', size: '14', color: 0xffffff, bgcolor: 0x000000 }
 					const ahead = values.aheadBehind >= 0
 					return {
-						text: `${ahead ? 'Ahead' : 'Behind'}\n${formatDuration(Math.abs(values.aheadBehind))}`,
+						text: `${ahead ? 'Ahead' : 'Behind'}\n${ahead ? '' : '-'}${formatDuration(Math.abs(values.aheadBehind))}`,
 						size: '14',
 						color: 0xffffff,
 						bgcolor: ahead ? 0x00aa00 : 0x8b0000,
@@ -666,7 +669,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					const segment = this.currentSegments().find((candidate) => candidate.index === index)
 					return {
 						text: segment ? `${segment.index}\n${segment.name}` : `SEGMENT\n${index}`,
-						size: '14',
+						size: segment ? '14' : 12,
 					}
 				},
 			},
@@ -1031,6 +1034,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
 		try {
 			const addon = loadNativeTlsAddon(moduleDirectory)
+			this.nativeTlsAddon = addon
 			this.bridge = addon.start(
 				endpoint.host,
 				String(endpoint.port),
@@ -1047,10 +1051,14 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					this.receive(data)
 				},
 				(message) => {
+					if (!this.bridge) return
 					this.connectionActive = false
 					this.updateDocumentStatus()
 					this.log('warn', `Keyed transport error: ${message}`)
 					this.updateStatus(InstanceStatus.ConnectionFailure, 'Keyed connection failed')
+					this.bridge = undefined
+					this.nativeTlsAddon = undefined
+					if (!this.destroyed) this.scheduleReconnect()
 				},
 			)
 		} catch (error) {
@@ -1067,7 +1075,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			if (this.documents.size === 0 && (this.socket || this.bridge))
 				this.updateStatus(InstanceStatus.UnknownWarning, 'Connected, but Teleprompter has not sent its document list')
 		}, 5000)
-		if (!this.networkKey()) this.scheduleDocumentRefresh()
+		this.scheduleDocumentRefresh()
 	}
 	private disconnect(): void {
 		this.connectionActive = false
@@ -1075,17 +1083,21 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		if (this.noDocumentTimer) clearTimeout(this.noDocumentTimer)
 		if (this.documentRefreshTimer) clearTimeout(this.documentRefreshTimer)
 		if (this.segmentStatusTimer) clearInterval(this.segmentStatusTimer)
-		if (this.timerStatusTimer) clearInterval(this.timerStatusTimer)
+		if (this.destroyed && this.timerStatusTimer) clearInterval(this.timerStatusTimer)
 		this.reconnectTimer = undefined
 		this.noDocumentTimer = undefined
 		this.documentRefreshTimer = undefined
 		this.segmentStatusTimer = undefined
-		this.timerStatusTimer = undefined
+		if (this.destroyed) this.timerStatusTimer = undefined
 		this.socket?.destroy()
 		this.socket = undefined
+		if (this.bridge && this.nativeTlsAddon) this.nativeTlsAddon.close(this.bridge)
 		this.bridge = undefined
+		this.nativeTlsAddon = undefined
 		this.receiveBuffer = Buffer.alloc(0)
 		this.documentTimingSnapshots.clear()
+		this.documentTimerStarts.clear()
+		this.refreshTimerStatus()
 		this.updateDocumentStatus()
 	}
 	private scheduleReconnect(): void {
@@ -1108,8 +1120,13 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	}
 	private async refreshDocuments(): Promise<boolean> {
 		// A keyed session is TLS-PSK; the persistent bridge already receives its
-		// snapshot. Do not open an unauthenticated refresh socket alongside it.
-		if (this.networkKey()) return this.hasSelectedDocumentTimingSnapshot()
+		// snapshot. Reconnect only when that snapshot is missing, such as after
+		// Teleprompter wakes or opens a different document.
+		if (this.networkKey()) {
+			const synchronized = this.hasSelectedDocumentTimingSnapshot()
+			if (!synchronized) this.reconnectKeyed()
+			return synchronized
+		}
 		const endpoint = this.endpoint()
 		if (!endpoint || this.destroyed) return false
 		return new Promise<boolean>((resolve) => {
@@ -1156,6 +1173,13 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			socket.on('close', finish)
 			timeout = setTimeout(finish, 5000)
 		})
+	}
+	private reconnectKeyed(): void {
+		if (!this.bridge || !this.nativeTlsAddon || this.reconnectTimer) return
+		this.nativeTlsAddon.close(this.bridge)
+		this.bridge = undefined
+		this.nativeTlsAddon = undefined
+		this.scheduleReconnect()
 	}
 	private receive(data: Buffer): void {
 		const decoded = decodeFrames(Buffer.concat([this.receiveBuffer, data]))
@@ -1274,8 +1298,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 						const timing = model ? this.findCrdtObject(model.timing) : undefined
 						const timerInfo = document ? this.findCrdtObject(model?.timerInfo) : undefined
 						const timerStart = this.findTypedNumber(timerInfo?.timerStart, 'Delta')
-						if (timerStart === undefined) this.documentTimerStarts.delete(documentId)
-						else this.documentTimerStarts.set(documentId, { elapsed: timerStart, receivedAt: Date.now() })
+						if (timerStart !== undefined) this.documentTimerStarts.set(documentId, { elapsed: timerStart, receivedAt: Date.now() })
 						const speed = this.findTypedNumber(timing?.manualSpeed, 'Double')
 						const maximumSpeed = this.findTypedNumber(model?.maximumSpeed, 'Double')
 						const maximumPosition = this.findTypedNumber(model?.maximumPosition, 'CGFloat')
@@ -1293,6 +1316,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 							})
 							this.documentTimingSnapshots.set(documentId, Date.now())
 							this.updateSegmentStatus()
+							if (documentId === this.config.documentId) this.updateDocumentStatus()
 						}
 						if (speed !== undefined) this.setDocumentSpeed(documentId, speed)
 						if (maximumSpeed !== undefined) this.documentMaximumSpeeds.set(documentId, maximumSpeed)
@@ -1506,27 +1530,29 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		const timerStart = this.documentTimerStarts.get(documentId)
 		const elapsed = timerStart ? timerStart.elapsed + (Date.now() - timerStart.receivedAt) / 1000 : 0
 		const timing = this.currentTiming(documentId)
-		const maximum = timing.maximumPosition
-		if (maximum === undefined) return { elapsed }
 		const position = timing.keyPosition
 		const points = this.documentTimingFunctions.get(documentId) ?? []
 		const scheduled = interpolateTimerTime(points, position)
 		if (this.selectedPlaybackMode() === 'timed' && points.length && scheduled !== undefined) {
-			const total = points.at(-1)?.time
+			const scheduledTotal = points.at(-1)?.time
+			const remaining = scheduledTotal === undefined ? undefined : Math.max(0, scheduledTotal - scheduled)
 			return {
 				elapsed,
-				total,
-				remaining: total === undefined ? undefined : Math.max(0, total - scheduled),
+				total: remaining === undefined ? undefined : showTimerTotal(elapsed, remaining),
+				remaining,
 				aheadBehind: scheduled - elapsed,
 			}
 		}
+		const maximum = timing.maximumPosition
+		if (maximum === undefined) return { elapsed, aheadBehind: scheduled === undefined ? undefined : scheduled - elapsed }
 		const speed = this.documentSpeeds.get(documentId)
 		if (speed === undefined || speed <= 0)
 			return { elapsed, aheadBehind: scheduled === undefined ? undefined : scheduled - elapsed }
+		const remaining = Math.max(0, maximum - position) / speed
 		return {
 			elapsed,
-			total: maximum / speed,
-			remaining: Math.max(0, maximum - position) / speed,
+			total: showTimerTotal(elapsed, remaining),
+			remaining,
 			aheadBehind: scheduled === undefined ? undefined : scheduled - elapsed,
 		}
 	}
