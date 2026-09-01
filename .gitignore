@@ -1,6 +1,8 @@
 .DS_Store
 node_modules/
 .yarn/install-state.gz
+.tooling/
+.venv-mbedtls/
 dist/
 pkg/
 *.tgz

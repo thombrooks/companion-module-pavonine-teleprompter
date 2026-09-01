@@ -35,15 +35,6 @@ export function keyedTransportUnsupportedMessage(
 	return undefined
 }
 
-/** A no-key device needs the user to clear a key only when Companion has one saved. */
-export function noKeyDeviceRequiresKeyClear(
-	networkKey: string,
-	deviceId: string,
-	challenge: string | undefined,
-): boolean {
-	return networkKey.trim().length > 0 && challenge === deviceId
-}
-
 /** Make a keyed-device mismatch actionable on platforms which cannot use the keyed bridge. */
 export function networkKeyDeviceLabelPrefix(
 	differentKey: boolean,
@@ -52,7 +43,9 @@ export function networkKeyDeviceLabelPrefix(
 	prebuildAvailable?: boolean,
 ): string | undefined {
 	if (!differentKey) return undefined
-	return keyedTransportUnsupportedMessage(platform, arch, prebuildAvailable) ? 'Network Key - Unsupported' : 'Different Network Key'
+	return keyedTransportUnsupportedMessage(platform, arch, prebuildAvailable)
+		? 'Network Key - Unsupported'
+		: 'Different Network Key'
 }
 
 /** Explain why protected documents cannot be listed when the keyed bridge is unavailable. */

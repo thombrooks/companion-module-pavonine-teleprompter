@@ -1,6 +1,6 @@
 {
 	"name": "companion-module-pavonine-teleprompter",
-	"version": "0.8.7",
+	"version": "0.8.19",
 	"description": "Experimental Bitfocus Companion control for Pavonine Teleprompter",
 	"main": "dist/main.js",
 	"type": "module",
@@ -8,7 +8,7 @@
 		"prebuild": "node scripts/require-node22.mjs",
 		"precheck": "node scripts/require-node22.mjs",
 		"pretest": "node scripts/require-node22.mjs",
-		"package": "yarn build && companion-module-build",
+		"package": "yarn build && companion-module-build && node scripts/prune-release-packages.mjs",
 		"build": "tsc -p tsconfig.build.json && sh scripts/build-tls-addon.sh",
 		"dev": "tsc -p tsconfig.build.json --watch",
 		"format": "prettier -w .",

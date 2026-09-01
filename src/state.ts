@@ -14,6 +14,32 @@ export function segmentButtonState(motion: Motion, isActive: boolean): SegmentBu
 	return motion === 'stopped' ? 'inactive-paused' : 'inactive-moving'
 }
 
+/** Choose the next paused navigation position, including document start/end fallbacks. */
+export function adjacentSegmentPosition(
+	segmentPositions: readonly number[],
+	position: number,
+	maximumPosition: number | undefined,
+	direction: -1 | 1,
+): number | undefined {
+	if (direction === -1) {
+		if (position <= 0) return undefined
+		const activeIndex = segmentPositions.reduce<number | undefined>(
+			(current, segmentPosition, index) => (segmentPosition <= position ? index : current),
+			undefined,
+		)
+		if (activeIndex === undefined) return 0
+		if (position > segmentPositions[activeIndex]) return segmentPositions[activeIndex]
+		return activeIndex > 0 ? segmentPositions[activeIndex - 1] : 0
+	}
+	const activeIndex = segmentPositions.reduce<number | undefined>(
+		(current, segmentPosition, index) => (segmentPosition <= position ? index : current),
+		undefined,
+	)
+	const nextIndex = activeIndex === undefined ? 0 : activeIndex + 1
+	if (nextIndex < segmentPositions.length) return segmentPositions[nextIndex]
+	return maximumPosition !== undefined && position < maximumPosition ? maximumPosition : undefined
+}
+
 export function addressPreference(address: string): number {
 	if (net.isIP(address) === 4) return 0
 	if (net.isIP(address) === 6 && !address.toLowerCase().startsWith('fe80:')) return 1
@@ -44,6 +70,22 @@ export function hasDifferentNetworkKey(networkKey: string, deviceId: string, cha
 	return key ? challenge !== networkKeyChallenge(key, deviceId) : challenge !== deviceId
 }
 
+/** Restore a restarted Teleprompter by its persisted friendly name and matching network key. */
+export function restoredDeviceId(
+	previousId: string,
+	previousName: string,
+	networkKey: string,
+	devices: ReadonlyArray<{ id: string; name: string; challenge?: string }>,
+): string | undefined {
+	if (!previousId || !previousName) return undefined
+	const matches = devices.filter(
+		(device) =>
+			device.name === previousName &&
+			(device.challenge === device.id || !hasDifferentNetworkKey(networkKey, device.id, device.challenge)),
+	)
+	return matches.length === 1 ? matches[0].id : undefined
+}
+
 export function clampManualSpeed(speed: number, maximumSpeed?: number): number {
 	const upper = typeof maximumSpeed === 'number' && Number.isFinite(maximumSpeed) ? maximumSpeed : Infinity
 	return Math.max(0, Math.min(upper, speed))
@@ -56,6 +98,29 @@ export function speedLabel(speed: number, maximumSpeed?: number): string {
 /** Teleprompter's Total timer combines elapsed show time with remaining script time. */
 export function showTimerTotal(elapsed: number, remaining: number): number {
 	return Math.max(0, elapsed + remaining)
+}
+
+/** Manual-mode elapsed time starts at the script's first scheduled time. */
+export function manualShowElapsed(
+	timerStart: { elapsed: number; receivedAt: number } | undefined,
+	scriptStartTime: number | undefined,
+	now: number,
+): number {
+	const liveElapsed = timerStart ? timerStart.elapsed + (now - timerStart.receivedAt) / 1000 : 0
+	return (scriptStartTime ?? 0) + liveElapsed
+}
+
+/** Timed playback uses the marker schedule itself, rather than the show clock. */
+export function timedShowTimerValues(
+	scheduled: number,
+	scheduledTotal: number,
+): { elapsed: number; remaining: number; total: number; aheadBehind: number } {
+	return {
+		elapsed: scheduled,
+		remaining: Math.max(0, scheduledTotal - scheduled),
+		total: scheduledTotal,
+		aheadBehind: 0,
+	}
 }
 
 export function selectedDocumentAfterDeviceChange(

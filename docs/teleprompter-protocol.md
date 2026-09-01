@@ -48,12 +48,7 @@ separate ping opcode.
 A payload is a JSON TreeMessage:
 
 ```json
-[
-  "MESSAGE-UUID",
-  false,
-  [[ ["documents", "DOCUMENT-UUID", "…"], "VALUE" ]],
-  0
-]
+["MESSAGE-UUID", false, [[["documents", "DOCUMENT-UUID", "…"], "VALUE"]], 0]
 ```
 
 The first element is a fresh message UUID. Receivers deduplicate it permanently,
@@ -120,15 +115,19 @@ visible and must not represent an ineffective manual-speed action as a success.
 ## Show timers
 
 `model/timerInfo/timerStart` establishes the show clock on the first forward play
-after Stop & Reset. Once started, **Elapsed** continues advancing while the
-playhead is paused, moving, or being scrubbed; it does not stop when prompting is
-paused. **Remaining** is derived from the current playhead position and remains
-fixed while paused. **Total** is the live sum of elapsed show time and the
-position-derived remaining duration. It therefore starts as the estimated
-start-to-finish duration after Stop & Reset, decreases as the playhead moves
-forward, and rises while the playhead remains paused because Elapsed continues.
-**Ahead / Behind** compares the position's scheduled elapsed time with the live
-Elapsed show clock.
+after Stop & Reset. In manual mode, **Elapsed** begins at the first key point's
+scheduled time and continues advancing while the playhead is paused, moving, or
+being scrubbed. **Remaining** is derived from the current playhead position and
+remains fixed while paused. **Total** is the live sum of elapsed show time and the
+position-derived remaining duration. During normal forward prompting those values
+change at the same rate, so Total stays constant; it changes when a scrub outruns
+the configured speed and rises while paused. **Ahead / Behind** compares the
+position's scheduled elapsed time with the live Elapsed show clock.
+
+In timed (Auto) mode, Elapsed, Remaining, and Total come directly from the marker
+timing function: Elapsed is the scheduled time at the playhead, Remaining is the
+time to its final key point, and Total is that final key point's time. They remain
+fixed while prompting is paused.
 
 ## Compliant control mutations
 
@@ -150,11 +149,25 @@ segment navigation.
 ## Module obligations
 
 - Never manufacture a timestamp-based CRDT index or persist a Bonjour instance UUID
-  as a device identifier.
+  as a device identifier. Persist the friendly device name instead, and restore a
+  restarted device only when exactly one same-name discovery candidate is
+  compatible with the saved network key. When the selected service disappears,
+  discard its cached document UUIDs while retaining the saved document name so a
+  newly opened same-name document can be reassociated.
+- Keep an authenticated keyed connection open while Teleprompter publishes a
+  complete timing snapshot. When the selected document is absent after a file
+  reopen, reconnect to obtain Teleprompter's current full document snapshot;
+  reconnecting solely for an incomplete timing snapshot causes a retry loop.
 - Parse the full document state before enabling position-sensitive controls.
 - Keep discovery information, transport state, and document availability distinct in
   UI feedback.
 - Store an optional network key locally and never alter Teleprompter's own key.
+  A discovered device whose label says **(No Network Key)** deliberately uses a
+  direct connection even if Companion still stores a key from an earlier device.
+- Configuration must remain saveable while a protected device is reconnecting.
+  Keep a saved document UUID as a valid, clearly labelled cached dropdown choice
+  until its live document list replaces it; a stale document selection must never
+  prevent an operator from saving a changed network key.
 - Test protocol behavior with isolated or sacrificial scripts before production use.
 
 ## Historical research

@@ -5,7 +5,6 @@ import {
 	keyedConnectionLog,
 	keyedTransportUnsupportedMessage,
 	maySendTransport,
-	noKeyDeviceRequiresKeyClear,
 	networkKeyDeviceLabelPrefix,
 	protectedDocumentUnavailableMessage,
 	stopResetPress,
@@ -34,12 +33,6 @@ test('keyed transport is enabled only when the current package contains its preb
 	assert.match(keyedTransportUnsupportedMessage('win32', 'ia32'), /not bundled for win32\/ia32/)
 	assert.match(keyedTransportUnsupportedMessage('linux', 'ppc64'), /not bundled for linux\/ppc64/)
 	assert.match(keyedTransportUnsupportedMessage('darwin', 'arm'), /Apple Silicon or Intel/)
-})
-
-test('a no-key device asks to clear a key only when Companion has one saved', () => {
-	assert.equal(noKeyDeviceRequiresKeyClear('', 'device', 'device'), false)
-	assert.equal(noKeyDeviceRequiresKeyClear('FOOBAR', 'device', 'device'), true)
-	assert.equal(noKeyDeviceRequiresKeyClear('FOOBAR', 'device', 'different-key'), false)
 })
 
 test('keyed-device labels distinguish a mismatch from an unsupported platform', () => {

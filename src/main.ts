@@ -26,25 +26,28 @@ import {
 	type TimingState,
 } from './protocol.js'
 import {
+	adjacentSegmentPosition,
 	automaticallySelectedDocument,
 	clampManualSpeed,
 	documentStatus,
 	evaluateTiming,
 	hasDifferentNetworkKey,
 	hasFreshDocumentTimingSnapshot,
+	manualShowElapsed,
 	networkKeyMaterial,
 	preferredHosts,
+	restoredDeviceId,
 	selectedDocumentAfterDeviceChange,
 	segmentButtonState,
 	showTimerTotal,
 	speedLabel,
+	timedShowTimerValues,
 } from './state.js'
 import { decodeFrames } from './stream.js'
 import {
 	keyedConnectionLog,
 	keyedTransportUnsupportedMessage,
 	maySendTransport,
-	noKeyDeviceRequiresKeyClear,
 	networkKeyDeviceLabelPrefix,
 	protectedDocumentUnavailableMessage,
 	stopResetPress,
@@ -280,7 +283,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		if (deviceChanged) this.saveConfig(this.config)
 		this.disconnect()
 		this.connect()
-		if (!keyChanged && !this.networkKey()) await this.refreshDocuments()
+		if (!keyChanged && !this.selectedNetworkKey()) await this.refreshDocuments()
 	}
 
 	public getConfigFields(): SomeCompanionConfigField[] {
@@ -297,18 +300,28 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					this.nativeTlsAddonAvailable(),
 				)
 			: undefined
+		const selectedNetworkKey = this.selectedNetworkKey()
 		const documentPlaceholder = protectedDocumentUnavailable
 			? protectedDocumentUnavailable
-			: selectedDevice && noKeyDeviceRequiresKeyClear(this.networkKey(), selectedDevice.id, selectedDevice.challenge)
-				? 'No Network Key — clear the saved key above to control this device'
-				: selectedDevice && this.hasDifferentKey(selectedDevice)
-					? 'Different Network Key — enter the matching key above'
-					: this.networkKey()
-						? 'Connecting securely — documents will appear after authentication'
-						: 'Discovering documents…'
-		const documentChoices = [{ id: '', label: documentPlaceholder }]
-		for (const [id, name] of [...this.documents.entries()].sort((a, b) => a[1].localeCompare(b[1])))
-			documentChoices.push({ id, label: name })
+			: selectedDevice && this.hasDifferentKey(selectedDevice)
+				? 'Different Network Key — enter the matching key above'
+				: selectedNetworkKey
+					? 'Connecting securely — documents will appear after authentication'
+					: 'Discovering documents…'
+		// Companion validates a dropdown's current value against its choices before
+		// enabling Save. Keep a stored document as a synthetic choice while its
+		// live list is unavailable, so editing only the network key is always valid.
+		const documentChoices = [...this.documents.entries()]
+			.sort((a, b) => a[1].localeCompare(b[1]))
+			.map(([id, name]) => ({ id, label: name }))
+		if (this.config.documentId && !this.documents.has(this.config.documentId)) {
+			documentChoices.unshift({
+				id: this.config.documentId,
+				label: `Cached document${this.config.documentName ? ` — ${this.config.documentName}` : ''} (reconnect after Save)`,
+			})
+		} else if (!documentChoices.length) {
+			documentChoices.push({ id: '', label: documentPlaceholder })
+		}
 		return [
 			{
 				type: 'static-text',
@@ -316,7 +329,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				label: 'Setup',
 				width: 12,
 				value:
-					'Choose a Teleprompter device and click Save, then reopen this panel to choose its document. A device labelled “Different Network Key” cannot be controlled until its Teleprompter network key matches the protected key below. Companion never changes Teleprompter’s setting.',
+					'Choose a Teleprompter device and click Save, then reopen this panel to choose its document. A device labelled “(No Network Key)” uses a direct connection and ignores any saved network key. A device labelled “Different Network Key” cannot be controlled until its Teleprompter network key matches the protected key below. Companion never changes Teleprompter’s setting.',
 			},
 			{
 				type: 'secret-text',
@@ -367,7 +380,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			{
 				type: 'dropdown',
 				id: 'documentId',
-				label: 'Document (after saving device)',
+				label: 'Document',
 				width: 12,
 				default: '',
 				choices: documentChoices,
@@ -417,11 +430,14 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			this.log('info', `Automatically selected the only available Teleprompter: ${name}`)
 			this.connect()
 		} else if (!this.config.manual && this.config.deviceId === id && !this.socket) this.connect()
-		else if (!this.config.manual && !this.devices.has(this.config.deviceId) && this.config.deviceName === name) {
-			const matches = [...this.devices.values()].filter((candidate) => candidate.name === name)
-			if (matches.length === 1) {
-				this.config = { ...this.config, deviceId: id }
-				this.log('info', `Restored Teleprompter selection after its service restarted: ${name}`)
+		else if (!this.config.manual && !this.devices.has(this.config.deviceId)) {
+			const restoredId = restoredDeviceId(this.config.deviceId, this.config.deviceName, this.networkKey(), [
+				...this.devices.values(),
+			])
+			if (restoredId) {
+				this.config = { ...this.config, deviceId: restoredId }
+				this.saveConfig(this.config)
+				this.log('info', `Restored Teleprompter selection after its service restarted: ${this.config.deviceName}`)
 				this.connect()
 			}
 		}
@@ -431,16 +447,34 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.log('info', `Teleprompter service went away: ${service.name}`)
 		if (!this.config.manual && this.config.deviceId === service.name) {
 			this.disconnect()
+			this.documents.clear()
+			this.documentMotions.clear()
+			this.documentTiming.clear()
+			this.documentTimingSnapshots.clear()
+			this.documentSpeeds.clear()
+			this.documentMaximumSpeeds.clear()
+			this.documentSelectors.clear()
+			this.documentTimerStarts.clear()
+			this.documentTimingFunctions.clear()
+			this.documentSegments.clear()
+			this.updateSegmentStatus()
 			this.updateStatus(InstanceStatus.Connecting, 'Waiting for Teleprompter to return')
 		}
 	}
 	private networkKey(): string {
 		return this.secrets.networkKey.trim()
 	}
+	/** A discovered no-key device deliberately takes precedence over a saved key. */
+	private selectedNetworkKey(): string {
+		const device = this.devices.get(this.config.deviceId)
+		return device && device.challenge === device.id ? '' : this.networkKey()
+	}
 	/** Do not enable keyed control simply because the source code supports a platform. */
 	private nativeTlsAddonAvailable(): boolean {
 		const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
-		const baseDirectory = existsSync(path.join(moduleDirectory, 'prebuilds')) ? moduleDirectory : path.dirname(moduleDirectory)
+		const baseDirectory = existsSync(path.join(moduleDirectory, 'prebuilds'))
+			? moduleDirectory
+			: path.dirname(moduleDirectory)
 		return existsSync(
 			path.join(
 				baseDirectory,
@@ -464,6 +498,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		return prefix ? `(${prefix}) ${device.name}` : device.name
 	}
 	private hasDifferentKey(device: TeleprompterDevice): boolean {
+		if (device.challenge === device.id) return false
 		return hasDifferentNetworkKey(this.networkKey(), device.id, device.challenge)
 	}
 	private txtString(value: unknown): string | undefined {
@@ -691,12 +726,12 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				],
 				callback: (feedback) => {
 					const previous = feedback.options.direction === 'previous'
-					const moving = this.motion !== 'stopped'
+					const unavailable = this.motion !== 'stopped' || this.adjacentSegmentPosition(previous ? -1 : 1) === undefined
 					return {
 						text: previous ? '◀ ☰' : '☰ ▶',
 						size: '24',
-						color: moving ? 0xaaaaaa : 0xffffff,
-						bgcolor: moving ? 0x505050 : 0x202020,
+						color: unavailable ? 0xaaaaaa : 0xffffff,
+						bgcolor: unavailable ? 0x505050 : 0x202020,
 					}
 				},
 			},
@@ -974,7 +1009,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		if (this.socket || this.bridge || this.reconnectTimer) return
 		this.log(
 			'info',
-			`Connecting to ${this.config.deviceId || 'no selected device'}; network key present: ${this.networkKey() ? 'yes' : 'no'}`,
+			`Connecting to ${this.config.deviceId || 'no selected device'}; network key present: ${this.selectedNetworkKey() ? 'yes' : 'no'}`,
 		)
 		const endpoint = this.endpoint()
 		if (!endpoint) {
@@ -986,7 +1021,8 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			this.updateStatus(InstanceStatus.ConnectionFailure, 'Different Network Key')
 			return
 		}
-		if (this.networkKey()) {
+		const networkKey = this.selectedNetworkKey()
+		if (networkKey) {
 			const unsupportedMessage = this.keyedTransportSupportMessage()
 			if (unsupportedMessage) {
 				this.updateStatus(InstanceStatus.ConnectionFailure, unsupportedMessage)
@@ -1004,7 +1040,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				this.updateStatus(InstanceStatus.ConnectionFailure, 'Different Network Key')
 				return
 			}
-			this.connectKeyed(device)
+			this.connectKeyed(device, networkKey)
 			return
 		}
 		this.updateStatus(InstanceStatus.Connecting)
@@ -1024,13 +1060,13 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			if (!this.destroyed) this.scheduleReconnect()
 		})
 	}
-	private connectKeyed(device: TeleprompterDevice): void {
+	private connectKeyed(device: TeleprompterDevice, networkKey: string): void {
 		this.updateStatus(InstanceStatus.Connecting, 'Connecting with network key')
 		this.keyedDataReceived = false
 		const hostIndex = this.keyedHostIndex % device.hosts.length
 		const endpoint: Endpoint = { host: device.hosts[hostIndex] ?? device.host, port: device.port }
 		this.log('info', keyedConnectionLog(endpoint.host, endpoint.port, true))
-		const psk = networkKeyMaterial(this.networkKey(), device.id)
+		const psk = networkKeyMaterial(networkKey, device.id)
 		const moduleDirectory = path.dirname(fileURLToPath(import.meta.url))
 		try {
 			const addon = loadNativeTlsAddon(moduleDirectory)
@@ -1120,12 +1156,12 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 	}
 	private async refreshDocuments(): Promise<boolean> {
 		// A keyed session is TLS-PSK; the persistent bridge already receives its
-		// snapshot. Reconnect only when that snapshot is missing, such as after
-		// Teleprompter wakes or opens a different document.
-		if (this.networkKey()) {
-			const synchronized = this.hasSelectedDocumentTimingSnapshot()
-			if (!synchronized) this.reconnectKeyed()
-			return synchronized
+		// snapshot. Teleprompter does not always publish a document-open update to
+		// an existing keyed peer, so recycle only when the selected document is
+		// absent. Do not reconnect merely because its timing snapshot is incomplete.
+		if (this.selectedNetworkKey()) {
+			if (!this.documents.has(this.config.documentId)) this.reconnectKeyed()
+			return this.hasSelectedDocumentTimingSnapshot()
 		}
 		const endpoint = this.endpoint()
 		if (!endpoint || this.destroyed) return false
@@ -1212,7 +1248,10 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 				if (this.isMotionPath(value)) {
 					const motion = this.findTimingMotion(node[index + 1]) ?? 'stopped'
 					this.documentMotions.set(value[1], motion)
-					if (value[1] === this.config.documentId) this.setPlaybackState(motion, true)
+					if (value[1] === this.config.documentId) {
+						this.log('info', `Received selected-document motion update: ${motion}`)
+						this.setPlaybackState(motion, true)
+					}
 				}
 				if (this.isTimingValuePath(value)) {
 					const type = value[4] === 'keyTime' ? 'Delta' : 'CGFloat'
@@ -1232,9 +1271,12 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 					}
 				}
 				if (this.isTimerStartPath(value)) {
-					const elapsed = this.findTypedNumber(node[index + 1], 'Delta')
-					if (elapsed === undefined) this.documentTimerStarts.delete(value[1])
-					else this.documentTimerStarts.set(value[1], { elapsed, receivedAt: Date.now() })
+					const timerStart = node[index + 1]
+					if (isUnsetValue(timerStart)) this.documentTimerStarts.delete(value[1])
+					else {
+						const elapsed = this.findTypedNumber(timerStart, 'Delta')
+						if (elapsed !== undefined) this.documentTimerStarts.set(value[1], { elapsed, receivedAt: Date.now() })
+					}
 					this.refreshTimerStatus()
 				}
 				if (this.isManualSpeedPath(value)) {
@@ -1297,8 +1339,17 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 						const model = document ? this.findCrdtObject(document.model) : undefined
 						const timing = model ? this.findCrdtObject(model.timing) : undefined
 						const timerInfo = document ? this.findCrdtObject(model?.timerInfo) : undefined
-						const timerStart = this.findTypedNumber(timerInfo?.timerStart, 'Delta')
-						if (timerStart !== undefined) this.documentTimerStarts.set(documentId, { elapsed: timerStart, receivedAt: Date.now() })
+						// A snapshot may omit timerStart altogether, which must not erase a
+						// value learned from an earlier incremental message. An explicit CRDT
+						// unset is different: Stop and Reset use it to clear the show clock.
+						if (timerInfo && Object.hasOwn(timerInfo, 'timerStart')) {
+							if (isUnsetValue(timerInfo.timerStart)) this.documentTimerStarts.delete(documentId)
+							else {
+								const timerStart = this.findTypedNumber(timerInfo.timerStart, 'Delta')
+								if (timerStart !== undefined)
+									this.documentTimerStarts.set(documentId, { elapsed: timerStart, receivedAt: Date.now() })
+							}
+						}
 						const speed = this.findTypedNumber(timing?.manualSpeed, 'Double')
 						const maximumSpeed = this.findTypedNumber(model?.maximumSpeed, 'Double')
 						const maximumPosition = this.findTypedNumber(model?.maximumPosition, 'CGFloat')
@@ -1326,7 +1377,10 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 						this.refreshTimerStatus()
 						const motion = this.findTimingMotion(timing?.motion) ?? 'stopped'
 						this.documentMotions.set(documentId, motion)
-						if (documentId === this.config.documentId) this.setPlaybackState(motion, true)
+						if (documentId === this.config.documentId) {
+							this.log('info', `Received selected-document motion snapshot: ${motion}`)
+							this.setPlaybackState(motion, true)
+						}
 						if (name) {
 							documents.set(documentId, name)
 						}
@@ -1489,6 +1543,11 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		return undefined
 	}
 	private setPlaybackState(motion: Motion, _authoritative = false): void {
+		if (this.motion !== motion)
+			this.log(
+				'info',
+				`Play/Pause feedback changed: ${motion === 'forward' ? 'playing' : motion === 'reverse' ? 'reverse' : 'paused'}`,
+			)
 		this.motion = motion
 		this.setVariableValues({
 			playback_state: motion === 'forward' ? 'Playing' : motion === 'reverse' ? 'Reverse' : 'Paused',
@@ -1527,24 +1586,18 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		{ elapsed: number; remaining?: number; total?: number; aheadBehind?: number } | undefined {
 		const documentId = this.config.documentId
 		if (!documentId || !this.hasSelectedDocumentTimingSnapshot()) return undefined
-		const timerStart = this.documentTimerStarts.get(documentId)
-		const elapsed = timerStart ? timerStart.elapsed + (Date.now() - timerStart.receivedAt) / 1000 : 0
 		const timing = this.currentTiming(documentId)
 		const position = timing.keyPosition
 		const points = this.documentTimingFunctions.get(documentId) ?? []
 		const scheduled = interpolateTimerTime(points, position)
 		if (this.selectedPlaybackMode() === 'timed' && points.length && scheduled !== undefined) {
 			const scheduledTotal = points.at(-1)?.time
-			const remaining = scheduledTotal === undefined ? undefined : Math.max(0, scheduledTotal - scheduled)
-			return {
-				elapsed,
-				total: remaining === undefined ? undefined : showTimerTotal(elapsed, remaining),
-				remaining,
-				aheadBehind: scheduled - elapsed,
-			}
+			if (scheduledTotal !== undefined) return timedShowTimerValues(scheduled, scheduledTotal)
 		}
+		const elapsed = manualShowElapsed(this.documentTimerStarts.get(documentId), points[0]?.time, Date.now())
 		const maximum = timing.maximumPosition
-		if (maximum === undefined) return { elapsed, aheadBehind: scheduled === undefined ? undefined : scheduled - elapsed }
+		if (maximum === undefined)
+			return { elapsed, aheadBehind: scheduled === undefined ? undefined : scheduled - elapsed }
 		const speed = this.documentSpeeds.get(documentId)
 		if (speed === undefined || speed <= 0)
 			return { elapsed, aheadBehind: scheduled === undefined ? undefined : scheduled - elapsed }
@@ -1689,6 +1742,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			'is_segment_unavailable',
 			'segment_button_style',
 			'segment_display',
+			'segment_navigation_display',
 		)
 	}
 	private updateSegmentStatusTracking(): void {
@@ -1739,13 +1793,38 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 		this.cancelStopResetConfirmation()
 		if (!(await this.refreshDocuments()))
 			throw new Error('Unable to synchronize the current document; command not sent')
-		const segments = this.currentSegments()
-		if (segments.length === 0) throw new Error('No segments are available for the selected document')
-		const active = this.activeSegment()
-		const targetIndex = active ? active.index + direction : 1
-		const target = segments.find((segment) => segment.index === targetIndex)
-		if (!target) return
-		await this.jumpToSegment(target.index, false)
+		const targetPosition = this.adjacentSegmentPosition(direction)
+		if (targetPosition === undefined) return
+		await this.jumpToPosition(targetPosition, false)
+	}
+	private adjacentSegmentPosition(direction: -1 | 1): number | undefined {
+		if (!this.hasSelectedDocumentTimingSnapshot()) return undefined
+		const timing = this.currentTiming(this.config.documentId)
+		return adjacentSegmentPosition(
+			this.currentSegments().map((segment) => segment.position),
+			timing.keyPosition,
+			timing.maximumPosition,
+			direction,
+		)
+	}
+	private async jumpToPosition(targetPosition: number, synchronize = true): Promise<void> {
+		if (synchronize && !(await this.refreshDocuments()))
+			throw new Error('Unable to synchronize the current document; command not sent')
+		const documentId = this.documentId()
+		if ((this.documentMotions.get(documentId) ?? 'stopped') !== 'stopped')
+			throw new Error('Pause the Teleprompter before navigating; command not sent')
+		const current = this.documentTiming.get(documentId)?.keyPosition ?? 0
+		const data = segmentJumpMutation(documentId, current, targetPosition, this.nextSequence())
+		this.log('info', `Segment navigation requested; writing ${data.length} bytes from ${current} to ${targetPosition}`)
+		await this.send(data)
+		this.documentTiming.set(documentId, {
+			...this.documentTiming.get(documentId),
+			keyPosition: targetPosition,
+			keyTime: 0,
+			scrolledPosition: targetPosition,
+			receivedAt: Date.now(),
+		})
+		this.updateSegmentStatus()
 	}
 	private selectOnlyDocument(): void {
 		const documentId = automaticallySelectedDocument(this.documents, this.config.documentId)
@@ -1778,6 +1857,7 @@ export default class TeleprompterInstance extends InstanceBase<ModuleSchema> {
 			this.config = { ...this.config, documentId }
 			this.saveConfig(this.config)
 			this.log('info', `Restored saved document selection: ${name}`)
+			this.updateSegmentStatus()
 		}
 	}
 	private updateDocumentStatus(): void {

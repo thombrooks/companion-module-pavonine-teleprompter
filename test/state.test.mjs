@@ -4,16 +4,19 @@ import test from 'node:test'
 
 import {
 	addressPreference,
+	adjacentSegmentPosition,
 	clampManualSpeed,
 	documentStatus,
 	evaluateTiming,
 	hasDifferentNetworkKey,
 	hasFreshDocumentTimingSnapshot,
+	manualShowElapsed,
 	networkKeyChallenge,
 	preferredHosts,
 	segmentButtonState,
 	showTimerTotal,
 	speedLabel,
+	timedShowTimerValues,
 } from '../dist/state.js'
 
 test('numbered segment button feedback has exactly four visual states', () => {
@@ -23,6 +26,19 @@ test('numbered segment button feedback has exactly four visual states', () => {
 	assert.equal(segmentButtonState('stopped', false), 'inactive-paused')
 	assert.equal(segmentButtonState('forward', false), 'inactive-moving')
 	assert.equal(segmentButtonState('reverse', false), 'inactive-moving')
+})
+
+test('segment navigation uses current starts and document boundaries as fallbacks', () => {
+	const positions = [100, 300]
+	assert.equal(adjacentSegmentPosition(positions, 0, 500, -1), undefined)
+	assert.equal(adjacentSegmentPosition(positions, 0, 500, 1), 100)
+	assert.equal(adjacentSegmentPosition(positions, 100, 500, -1), 0)
+	assert.equal(adjacentSegmentPosition(positions, 200, 500, -1), 100)
+	assert.equal(adjacentSegmentPosition(positions, 200, 500, 1), 300)
+	assert.equal(adjacentSegmentPosition(positions, 300, 500, -1), 100)
+	assert.equal(adjacentSegmentPosition(positions, 300, 500, 1), 500)
+	assert.equal(adjacentSegmentPosition(positions, 400, 500, -1), 300)
+	assert.equal(adjacentSegmentPosition(positions, 500, 500, 1), undefined)
 })
 
 test('discovery prefers IPv4, then global IPv6, then unusable link-local IPv6', () => {
@@ -51,7 +67,9 @@ test('network-key challenge accepts only the matching key and reproduces the app
 	assert.equal(hasDifferentNetworkKey('', id, id), false)
 	assert.equal(hasDifferentNetworkKey('', id, challenge), true)
 	const appPasswordBytes = Buffer.from('café', 'utf8').subarray(0, [...'café'].length)
-	const expected = createHash('sha256').update(pbkdf2Sync(appPasswordBytes, id, 4096, 32, 'sha256')).digest('base64')
+	const expected = createHash('sha256')
+		.update(pbkdf2Sync(appPasswordBytes, id, 4096, 32, 'sha256'))
+		.digest('base64')
 	assert.equal(networkKeyChallenge('café', id), expected)
 	assert.notEqual(networkKeyChallenge('café', id), networkKeyChallenge('cafe', id))
 })
@@ -69,6 +87,21 @@ test('Total is the live elapsed show clock plus the position-derived remaining d
 	assert.equal(showTimerTotal(25, 335), 360)
 	assert.equal(showTimerTotal(35, 335), 370)
 	assert.equal(showTimerTotal(35, 120), 155)
+})
+
+test('manual show time retains the script start-time offset', () => {
+	assert.equal(manualShowElapsed({ elapsed: 4, receivedAt: 1_000 }, 37, 6_000), 46)
+	assert.equal(manualShowElapsed(undefined, 37, 6_000), 37)
+	assert.equal(manualShowElapsed({ elapsed: 4, receivedAt: 1_000 }, undefined, 6_000), 9)
+})
+
+test('timed show timers follow the marker schedule and do not advance while paused', () => {
+	assert.deepEqual(timedShowTimerValues(125, 360), {
+		elapsed: 125,
+		remaining: 235,
+		total: 360,
+		aheadBehind: 0,
+	})
 })
 
 test('document status distinguishes connection, discovery, and a live selected document', () => {
@@ -97,7 +130,12 @@ test('timing evaluator uses keyTime only while moving and scrolledPosition only 
 
 test('timing evaluator clamps the protocol-derived position without inventing a local start time', () => {
 	assert.equal(
-		evaluateTiming({ keyPosition: 500, keyTime: 0, scrolledPosition: 20, maximumPosition: 1000 }, 'forward', 100, 2_500),
+		evaluateTiming(
+			{ keyPosition: 500, keyTime: 0, scrolledPosition: 20, maximumPosition: 1000 },
+			'forward',
+			100,
+			2_500,
+		),
 		750,
 	)
 	assert.equal(
