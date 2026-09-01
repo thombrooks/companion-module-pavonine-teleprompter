@@ -63,9 +63,9 @@ The tests intentionally do not assert randomized message UUID values or random a
 
 Use a sacrificial copy of a script, not an active production script. Keep both the Mac/iPad Teleprompter host and Companion on the intended production network.
 
-- [x] With no network key, the device appears once despite multiple local NICs and the document picker shows the open document. Confirmed on Windows and Linux for 0.8.19.
+- [x] With no network key, the device appears once despite multiple local NICs and the document picker shows the open document. Confirmed on Windows and Linux for 0.9.0.
 - [x] On macOS, with a matching network key, the device and its open document appear after authentication.
-- [x] On Linux and Windows, a matching network key authenticates successfully and document discovery works without a native-addon load error. Confirmed for 0.8.19.
+- [x] On Linux and Windows, a matching network key authenticates successfully and document discovery works without a native-addon load error. Confirmed for 0.9.0.
 - [ ] With an intentionally wrong key, the device remains visible as **Different Network Key** and no document is offered.
 - [ ] Select a device labelled **(No Network Key)** while a saved network key is present. Save without changing the key and confirm the module makes a direct connection.
 - [ ] With a cached document selected, change only the network key. Confirm **Save** remains available; the Document dropdown must show the cached document as **reconnect after Save**, then replace it with the live document list after authentication.

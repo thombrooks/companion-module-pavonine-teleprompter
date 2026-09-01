@@ -1,9 +1,9 @@
 # Historical follow-up notes, against 0.8.1 (`d99f607`)
 
 This is the original-author comparison record, retained for its detailed
-rationale. It is closed as of 0.8.19.
+rationale. It is closed as of 0.9.0.
 
-## Resolution status at 0.8.19
+## Resolution status at 0.9.0
 
 All six observations below have been addressed:
 
